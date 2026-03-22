@@ -1,9 +1,19 @@
-from google import genai
-from google.genai import types
+import json
+import logging
+import time
+import uuid
 
 from src.models import Story, Party, DynamicScene, TurnRecord, GameState
+from src.openclaw_client import (
+    DM_AGENT_ID,
+    is_available as openclaw_available,
+    run_structured,
+    run_text,
+)
 
-MODEL = "gemini-flash-latest"
+logger = logging.getLogger(__name__)
+
+GEMINI_MODEL = "gemini-flash-latest"
 
 SYSTEM_INSTRUCTION = """\
 You are a Dungeons & Dragons Dungeon Master telling a story. \
@@ -128,12 +138,50 @@ ALWAYS use these character names. NEVER say "Player 1" or "Master 1".
 """
 
 
+def _get_gemini():
+    """Lazy-load the Gemini client (only needed for fallback)."""
+    import os
+    from google import genai
+    return genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+def _gemini_json(prompt: str, system: str, schema: dict, model: str = GEMINI_MODEL) -> str:
+    """Generate JSON via Gemini (fallback path)."""
+    from google.genai import types
+    client = _get_gemini()
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            response_mime_type="application/json",
+            response_json_schema=schema,
+        ),
+    )
+    return response.text
+
+
 class DungeonMaster:
     def __init__(self, api_key: str | None = None):
-        kwargs = {"api_key": api_key} if api_key else {}
-        self.client = genai.Client(**kwargs)
+        self._use_openclaw = openclaw_available()
+        self._api_key = api_key
         self._chat = None
         self._config = None
+        self._session_id = uuid.uuid4().hex[:8]
+        self._system_prompt: str | None = None
+        self._turn_history: list[str] = []
+
+        backend = "OpenClaw" if self._use_openclaw else "Gemini"
+        print(f"  [DM] Backend: {backend}")
+
+    def _openclaw_prompt(self, prompt: str, schema_hint: str) -> str:
+        """Build a prompt that instructs OpenClaw to return valid JSON."""
+        return (
+            f"{prompt}\n\n"
+            f"IMPORTANT: Respond with ONLY valid JSON matching this schema:\n"
+            f"{schema_hint}\n"
+            f"No markdown, no explanation, just the JSON object."
+        )
 
     def create_story(self, num_players: int, theme: str | None = None) -> Story:
         theme_line = f"Theme/tone requested: {theme}" if theme else "Choose an exciting theme."
@@ -152,18 +200,23 @@ Requirements:
 - Use simple everyday words. No fancy fantasy language.
 - The locations should tell a journey: start somewhere safe, travel through danger, reach the goal.
 """
+        t0 = time.monotonic()
 
-        response = self.client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_json_schema=Story.model_json_schema(),
-            ),
-        )
+        if self._use_openclaw:
+            result = run_structured(
+                DM_AGENT_ID,
+                f"{SYSTEM_INSTRUCTION}\n\n{prompt}",
+                Story,
+                session_name=f"story-{self._session_id}",
+            )
+            if result is not None:
+                logger.info("Story created via OpenClaw (%.1fs)", time.monotonic() - t0)
+                return result
+            logger.warning("OpenClaw failed for story — falling back to Gemini.")
 
-        return Story.model_validate_json(response.text)
+        text = _gemini_json(prompt, SYSTEM_INSTRUCTION, Story.model_json_schema())
+        logger.info("Story created via Gemini (%.1fs)", time.monotonic() - t0)
+        return Story.model_validate_json(text)
 
     def create_party(self, story: Story, num_players: int) -> Party:
         prompt = f"""\
@@ -189,18 +242,23 @@ Requirements:
 - Give them a relationship to each other (friends, siblings, rivals, etc.)
 - Every character MUST have a unique fantasy name. NEVER use generic labels like "Player 1".
 """
+        t0 = time.monotonic()
 
-        response = self.client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_json_schema=Party.model_json_schema(),
-            ),
-        )
+        if self._use_openclaw:
+            result = run_structured(
+                DM_AGENT_ID,
+                f"{SYSTEM_INSTRUCTION}\n\n{prompt}",
+                Party,
+                session_name=f"party-{self._session_id}",
+            )
+            if result is not None:
+                logger.info("Party created via OpenClaw (%.1fs)", time.monotonic() - t0)
+                return result
+            logger.warning("OpenClaw failed for party — falling back to Gemini.")
 
-        return Party.model_validate_json(response.text)
+        text = _gemini_json(prompt, SYSTEM_INSTRUCTION, Party.model_json_schema())
+        logger.info("Party created via Gemini (%.1fs)", time.monotonic() - t0)
+        return Party.model_validate_json(text)
 
     def create_party_from_descriptions(
         self, story: Story, descriptions: list[str],
@@ -237,47 +295,116 @@ Requirements:
 - Give them a relationship to each other (friends, siblings, rivals, etc.)
 - Every character MUST have a unique fantasy name. NEVER use "Player 1" etc.
 """
+        t0 = time.monotonic()
 
-        response = self.client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_json_schema=Party.model_json_schema(),
-            ),
-        )
+        if self._use_openclaw:
+            result = run_structured(
+                DM_AGENT_ID,
+                f"{SYSTEM_INSTRUCTION}\n\n{prompt}",
+                Party,
+                session_name=f"party-{self._session_id}",
+            )
+            if result is not None:
+                logger.info("Party (from descriptions) via OpenClaw (%.1fs)", time.monotonic() - t0)
+                return result
+            logger.warning("OpenClaw failed for party descriptions — falling back to Gemini.")
 
-        return Party.model_validate_json(response.text)
+        text = _gemini_json(prompt, SYSTEM_INSTRUCTION, Party.model_json_schema())
+        logger.info("Party (from descriptions) via Gemini (%.1fs)", time.monotonic() - t0)
+        return Party.model_validate_json(text)
 
     def start_session(self, story: Story, party: Party):
-        system_prompt = _build_dm_system_prompt(story, party)
+        self._system_prompt = _build_dm_system_prompt(story, party)
+        self._turn_history = []
 
-        self._config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_json_schema=DynamicScene.model_json_schema(),
-        )
-
-        self._chat = self.client.chats.create(model=MODEL, config=self._config)
+        if not self._use_openclaw:
+            from google.genai import types
+            client = _get_gemini()
+            self._config = types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                response_mime_type="application/json",
+                response_json_schema=DynamicScene.model_json_schema(),
+            )
+            self._chat = client.chats.create(model=GEMINI_MODEL, config=self._config)
 
     def get_first_scene(self) -> DynamicScene:
-        if not self._chat:
-            raise RuntimeError("Call start_session() first.")
-
-        response = self._chat.send_message(
+        first_prompt = (
             "Begin the adventure. Write the opening scene like the first page of a book. "
             "Set the mood, introduce what the players see. "
             "Pick one player to act first -- whoever the story naturally starts with."
         )
+        t0 = time.monotonic()
+
+        if self._use_openclaw:
+            full_prompt = (
+                f"{self._system_prompt}\n\n"
+                f"RESPOND WITH ONLY VALID JSON matching the DynamicScene schema.\n\n"
+                f"{first_prompt}"
+            )
+            result = run_structured(
+                DM_AGENT_ID, full_prompt, DynamicScene,
+                session_name=f"game-{self._session_id}",
+            )
+            if result is not None:
+                self._turn_history.append(f"USER: {first_prompt}")
+                self._turn_history.append(f"DM: {result.model_dump_json()}")
+                logger.info("First scene via OpenClaw (%.1fs)", time.monotonic() - t0)
+                return result
+            logger.warning("OpenClaw failed for first scene — falling back to Gemini.")
+            self._init_gemini_fallback()
+
+        if not self._chat:
+            raise RuntimeError("Call start_session() first.")
+        response = self._chat.send_message(first_prompt)
+        logger.info("First scene via Gemini (%.1fs)", time.monotonic() - t0)
         return DynamicScene.model_validate_json(response.text)
 
     def play_turn(self, action_summary: str) -> DynamicScene:
+        t0 = time.monotonic()
+
+        if self._use_openclaw:
+            self._turn_history.append(f"USER: {action_summary}")
+            history_context = "\n".join(self._turn_history[-10:])
+            full_prompt = (
+                f"{self._system_prompt}\n\n"
+                f"CONVERSATION SO FAR:\n{history_context}\n\n"
+                f"NOW respond to:\n{action_summary}\n\n"
+                f"RESPOND WITH ONLY VALID JSON matching the DynamicScene schema."
+            )
+            result = run_structured(
+                DM_AGENT_ID, full_prompt, DynamicScene,
+                session_name=f"game-{self._session_id}",
+            )
+            if result is not None:
+                self._turn_history.append(f"DM: {result.model_dump_json()}")
+                logger.info("Turn via OpenClaw (%.1fs)", time.monotonic() - t0)
+                return result
+            logger.warning("OpenClaw failed for turn — falling back to Gemini.")
+            self._init_gemini_fallback()
+
         if not self._chat:
             raise RuntimeError("Call start_session() first.")
-
         response = self._chat.send_message(action_summary)
+        logger.info("Turn via Gemini (%.1fs)", time.monotonic() - t0)
         return DynamicScene.model_validate_json(response.text)
+
+    def _init_gemini_fallback(self):
+        """Initialize Gemini chat as a mid-game fallback when OpenClaw fails."""
+        if self._chat is not None:
+            return
+        from google.genai import types
+        client = _get_gemini()
+        self._config = types.GenerateContentConfig(
+            system_instruction=self._system_prompt,
+            response_mime_type="application/json",
+            response_json_schema=DynamicScene.model_json_schema(),
+        )
+        self._chat = client.chats.create(model=GEMINI_MODEL, config=self._config)
+        for entry in self._turn_history:
+            if entry.startswith("USER: "):
+                self._chat.send_message(entry[6:])
+        self._use_openclaw = False
+        logger.info("Switched to Gemini fallback mid-game.")
 
     def create_game(
         self, num_players: int, theme: str | None = None,

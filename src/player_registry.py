@@ -79,18 +79,16 @@ def _wait_for_voice(robot, timeout: float = DOA_TIMEOUT_S) -> float | None:
 
 
 def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
-    """Locate each player by voice, record them describing their hero
-    (used for both voice cloning and character generation)."""
-    from src.audio import transcribe
-    from src.voice_clone import clone_voice, record_voice_sample
+    """Locate each player by voice (DoA) and register their position."""
+    # TODO: re-enable when voice cloning is ready
+    # from src.audio import transcribe
+    # from src.voice_clone import clone_voice, record_voice_sample
 
-    print("\n  Player Registration (DoA + Hero + Voice Clone)")
+    print("\n  Player Registration (DoA)")
     print("  " + "=" * 40)
     voice.announce(
         "Let me find where everyone is sitting! "
-        "Each player, say hello when I call you, then describe "
-        "the kind of hero you want to be. Speak for about ten seconds "
-        "so I can learn your voice too!"
+        "Each player, say hello when I call you!"
     )
 
     players: list[RegisteredPlayer] = []
@@ -108,7 +106,6 @@ def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
             yaw = 0.0
             logger.warning("No voice detected for player %d — defaulting to front.", i)
 
-        # Rotate body + head toward the player
         body_rad, head_deg = _split_yaw(yaw)
         pose = create_head_pose(pitch=0, yaw=head_deg, roll=0, degrees=True, mm=True)
         robot.goto_target(head=pose, body_yaw=body_rad, duration=0.6)
@@ -117,43 +114,39 @@ def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
         if voice.emotions:
             voice.emotions.set_base_yaw(head_deg)
 
-        voice.announce(
-            "Found you! Now tell me, what kind of hero do you want to be? "
-            "A sneaky rogue? A powerful wizard? A brave warrior? "
-            "Describe your dream character! Keep talking for about ten seconds."
-        )
-        print(f"  Recording hero description + voice sample for player {i} (~12s)...")
-        audio = record_voice_sample(robot)
+        voice.announce("Found you!")
 
-        # Transcribe the description for character generation
-        hero_desc = None
-        cloned_id = None
-        if audio is not None:
-            hero_desc = transcribe(audio)
-            if hero_desc:
-                print(f"  Player {i} wants: \"{hero_desc}\"")
-            else:
-                print(f"  Could not transcribe player {i}'s description.")
+        # TODO: re-enable hero description + voice cloning
+        # voice.announce(
+        #     "Now tell me, what kind of hero do you want to be? "
+        #     "A sneaky rogue? A powerful wizard? A brave warrior? "
+        #     "Describe your dream character! Keep talking for about ten seconds."
+        # )
+        # print(f"  Recording hero description + voice sample for player {i} (~12s)...")
+        # audio = record_voice_sample(robot)
+        #
+        # hero_desc = None
+        # cloned_id = None
+        # if audio is not None:
+        #     hero_desc = transcribe(audio)
+        #     if hero_desc:
+        #         print(f"  Player {i} wants: \"{hero_desc}\"")
+        #     else:
+        #         print(f"  Could not transcribe player {i}'s description.")
+        #     print(f"  Cloning voice for player {i}...")
+        #     cloned_id = clone_voice(audio, i)
+        #     if cloned_id:
+        #         print(f"  Voice cloned: {cloned_id}")
+        #     else:
+        #         print(f"  Voice clone failed — will use preset voice.")
+        # else:
+        #     print(f"  No audio captured for player {i}.")
 
-            # Clone the voice in parallel-ish
-            print(f"  Cloning voice for player {i}...")
-            cloned_id = clone_voice(audio, i)
-            if cloned_id:
-                print(f"  Voice cloned: {cloned_id}")
-            else:
-                print(f"  Voice clone failed — will use preset voice.")
-        else:
-            print(f"  No audio captured for player {i}.")
-
-        voice.announce("Great choice!")
         players.append(RegisteredPlayer(
             real_name=f"Player {i}",
             yaw_deg=yaw,
-            cloned_voice_id=cloned_id,
-            hero_description=hero_desc,
         ))
 
-    # Return to center (body + head)
     if voice.emotions:
         voice.emotions.set_base_yaw(0.0)
     neutral = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)

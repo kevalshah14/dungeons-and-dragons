@@ -26,7 +26,7 @@ from src.models import DynamicScene, GameState
 from src.player_registry import (
     PlayerSweep,
     RegisteredPlayer,
-    apply_cloned_voices,
+    # apply_cloned_voices,  # TODO: re-enable when voice cloning is ready
     assign_characters,
     face_neutral,
     face_player,
@@ -363,7 +363,7 @@ def run_game(
     registry: dict[str, RegisteredPlayer] | None = None
     if players:
         registry = assign_characters(players, game.party)
-        apply_cloned_voices(registry, voice.voice_map)
+        # apply_cloned_voices(registry, voice.voice_map)  # TODO: re-enable
         voice.set_registry(registry)
         voice_input.set_registry(registry)
 

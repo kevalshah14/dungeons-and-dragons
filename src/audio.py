@@ -6,8 +6,7 @@ Supports two mic sources:
   2. Reachy Mini robot microphone via robot.media
 
 Both use VAD (energy threshold + silence timeout).
-Transcription is handled by Gemini's native audio understanding
-(inline WAV bytes sent to generateContent).
+Transcription: OpenClaw STT agent (primary) with Gemini fallback.
 """
 
 import io
@@ -221,16 +220,47 @@ def record_speech_reachy(
 
 
 # ---------------------------------------------------------------------------
-# Gemini-based transcription
+# Transcription (OpenClaw primary, Gemini fallback)
 # ---------------------------------------------------------------------------
 
-def transcribe(audio: np.ndarray) -> str | None:
-    """Transcribe a float32 audio array using Gemini's audio understanding."""
+_use_openclaw_stt: bool | None = None
+
+
+def _check_openclaw_stt() -> bool:
+    global _use_openclaw_stt
+    if _use_openclaw_stt is not None:
+        return _use_openclaw_stt
+    try:
+        from src.openclaw_client import is_available
+        _use_openclaw_stt = is_available()
+    except Exception:
+        _use_openclaw_stt = False
+    return _use_openclaw_stt
+
+
+def _transcribe_openclaw(wav_bytes: bytes) -> str | None:
+    """Transcribe using the OpenClaw STT agent."""
+    import base64
+    from src.openclaw_client import run_text, STT_AGENT_ID
+
+    audio_b64 = base64.b64encode(wav_bytes).decode()
+    prompt = (
+        "Transcribe this audio exactly. Return ONLY the spoken words, nothing else. "
+        "If no clear speech is present, return an empty string.\n\n"
+        f"[Audio data (base64 WAV, {len(wav_bytes)} bytes): {audio_b64[:200]}...]"
+    )
+    result = run_text(STT_AGENT_ID, prompt, session_name="stt")
+    if result:
+        text = result.strip().strip('"').strip("'").lower()
+        return text if text else None
+    return None
+
+
+def _transcribe_gemini(wav_bytes: bytes) -> str | None:
+    """Transcribe using Gemini's native audio understanding (fallback)."""
     from google.genai import types
 
-    wav_bytes = _audio_to_wav_bytes(audio)
     client = _get_gemini_client()
-
     t0 = time.monotonic()
     try:
         response = client.models.generate_content(
@@ -248,14 +278,29 @@ def transcribe(audio: np.ndarray) -> str | None:
         elapsed = time.monotonic() - t0
         text = response.text.strip().strip('"').strip("'").lower()
         if not text:
-            logger.debug("STT returned empty (%.2fs)", elapsed)
+            logger.debug("Gemini STT returned empty (%.2fs)", elapsed)
             return None
-        logger.info("STT [%s]: '%s' (%.2fs)", STT_MODEL, text, elapsed)
+        logger.info("STT [Gemini %s]: '%s' (%.2fs)", STT_MODEL, text, elapsed)
         return text
     except Exception as e:
         elapsed = time.monotonic() - t0
         logger.warning("Gemini transcription failed (%.2fs): %s", elapsed, e)
         return None
+
+
+def transcribe(audio: np.ndarray) -> str | None:
+    """Transcribe audio. Tries OpenClaw STT first, falls back to Gemini."""
+    wav_bytes = _audio_to_wav_bytes(audio)
+    t0 = time.monotonic()
+
+    if _check_openclaw_stt():
+        result = _transcribe_openclaw(wav_bytes)
+        if result is not None:
+            logger.info("STT [OpenClaw]: '%s' (%.2fs)", result, time.monotonic() - t0)
+            return result
+        logger.debug("OpenClaw STT returned nothing — falling back to Gemini.")
+
+    return _transcribe_gemini(wav_bytes)
 
 
 # ---------------------------------------------------------------------------
