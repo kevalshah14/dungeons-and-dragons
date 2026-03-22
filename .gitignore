@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Secrets
+.env
+
+# Game saves
+saves/
+
+# Reference docs (not part of the app)
+docs/
