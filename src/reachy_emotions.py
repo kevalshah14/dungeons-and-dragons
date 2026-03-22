@@ -54,6 +54,7 @@ class ReachyEmotions:
         self._emote_thread: threading.Thread | None = None
         self._talking = False
         self._talk_thread: threading.Thread | None = None
+        self._base_yaw: float = 0.0
 
     def load(self):
         """Download/cache the emotions library. Call once at startup."""
@@ -93,6 +94,10 @@ class ReachyEmotions:
         if emotes:
             self.play_emotion(random.choice(emotes), sound)
 
+    def set_base_yaw(self, yaw_deg: float):
+        """Set the base yaw so talking animation stays facing the right direction."""
+        self._base_yaw = yaw_deg
+
     def start_talking(self):
         """Start a subtle nodding/swaying animation while TTS plays."""
         self._talking = True
@@ -119,11 +124,12 @@ class ReachyEmotions:
             pass
 
     def _talking_loop(self):
-        """Gentle random head micro-movements to simulate talking."""
+        """Gentle random head micro-movements around the base yaw."""
+        base = self._base_yaw
         try:
             while self._talking:
                 pitch = random.uniform(-3, 3)
-                yaw = random.uniform(-4, 4)
+                yaw = base + random.uniform(-4, 4)
                 roll = random.uniform(-2, 2)
                 duration = random.uniform(0.3, 0.6)
 
@@ -131,14 +137,17 @@ class ReachyEmotions:
                     pitch=pitch, yaw=yaw, roll=roll,
                     degrees=True, mm=True,
                 )
-                self.mini.goto_target(head=pose, duration=duration)
+                self.mini.goto_target(head=pose, body_yaw=None, duration=duration)
                 time.sleep(duration)
         except Exception:
             pass
         finally:
             try:
-                home = create_head_pose(degrees=True, mm=True)
-                self.mini.goto_target(head=home, duration=0.4)
+                pose = create_head_pose(
+                    pitch=0, yaw=base, roll=0,
+                    degrees=True, mm=True,
+                )
+                self.mini.goto_target(head=pose, body_yaw=None, duration=0.4)
             except Exception:
                 pass
 

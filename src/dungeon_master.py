@@ -29,6 +29,11 @@ They haven't noticed the noise yet. Pippin is closest to the shadows."
 EXAMPLE OF BAD NARRATIVE:
 "Kael broke the lock. The gate opened. There are goblins inside."
 
+NAMING RULE (CRITICAL):
+- ALWAYS refer to player characters by their CHARACTER NAME (e.g. "Kael", "Pippin").
+- NEVER say "Player 1", "Player 2", "Master 1", or any generic label.
+- In narrative, dialogue, situation, and options: use the character's actual name.
+
 PICKING WHO ACTS:
 - You choose ONE player to act each turn. Set their name as "active_player".
 - Pick whoever the story naturally focuses on right now.
@@ -119,6 +124,7 @@ THE PARTY ({len(party.players)} players):
 {player_details}
 
 Player names you can pick as active_player: {', '.join(p.name for p in party.players)}.
+ALWAYS use these character names. NEVER say "Player 1" or "Master 1".
 """
 
 
@@ -181,6 +187,7 @@ Requirements:
 - List 2-3 class abilities
 - Simple language everywhere
 - Give them a relationship to each other (friends, siblings, rivals, etc.)
+- Every character MUST have a unique fantasy name. NEVER use generic labels like "Player 1".
 """
 
         response = self.client.models.generate_content(

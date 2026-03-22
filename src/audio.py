@@ -34,7 +34,7 @@ REACHY_POLL_S = 0.005
 REACHY_WAIT_TIMEOUT_S = 15.0
 REACHY_CONFIRM_FRAMES = 2  # consecutive loud frames needed before counting as speech
 
-STT_MODEL = "gemini-2.5-flash"
+STT_MODEL = "gemini-3-flash-preview"
 
 # ---------------------------------------------------------------------------
 # Lazy Gemini client
@@ -236,11 +236,14 @@ def transcribe(audio: np.ndarray) -> str | None:
         response = client.models.generate_content(
             model=STT_MODEL,
             contents=[
+                types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav"),
                 "Transcribe this speech exactly. "
                 "Return ONLY the spoken words, nothing else. "
                 "If no clear speech is present, return an empty string.",
-                types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav"),
             ],
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         elapsed = time.monotonic() - t0
         text = response.text.strip().strip('"').strip("'").lower()

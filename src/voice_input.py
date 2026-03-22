@@ -182,11 +182,6 @@ def ask_choice(question: str, options: list[str]) -> int:
     Understands spoken numbers ("one", "two") and fuzzy keyword
     matching ("sneak" matches "Sneak past the guards").
     """
-    real_name = _active_real_name()
-    if real_name:
-        _say(f"{real_name}, what do you choose?")
-    else:
-        _say("What do you choose?")
     print(f"  🎤 Listening for choice (1-{len(options)})...")
 
     for attempt in range(MAX_RETRIES):

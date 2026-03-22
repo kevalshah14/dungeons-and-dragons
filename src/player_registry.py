@@ -1,23 +1,44 @@
 """
 Player registration for the current game session.
 
-Reachy rotates to each player position (evenly spaced), asks
-their name, and stores name + yaw angle. During the game,
-Reachy turns to face the active player on their turn.
+Uses Direction of Arrival (DoA) from Reachy's mic array to locate
+each player by their voice. Reachy asks each player to say hello,
+detects where the voice came from, turns toward them, and asks
+their name. Stores name + yaw angle for head tracking during the game.
 
-No camera, no face detection -- just in-memory state.
+Wide angles use body rotation (body_yaw) so Reachy faces the player
+with its whole body, not just its neck.
 """
 
 import logging
+import math
+import random
+import threading
 import time
 from dataclasses import dataclass
 
+import numpy as np
 from reachy_mini.utils import create_head_pose
 
 logger = logging.getLogger(__name__)
 
-SCAN_MIN_DEG = -50.0
-SCAN_MAX_DEG = 50.0
+# DoA returns 0 = left, π/2 = front, π = right.
+# Reachy yaw: positive = left, negative = right (degrees).
+_DOA_FRONT = math.pi / 2
+_YAW_RANGE_DEG = 55.0
+
+# If the target yaw exceeds this, rotate the body instead of just the neck.
+_HEAD_ONLY_MAX_DEG = 35.0
+
+DOA_POLL_S = 0.05
+DOA_TIMEOUT_S = 15.0
+
+
+def doa_to_yaw_deg(doa_rad: float) -> float:
+    """Convert a DoA mic-array angle (radians) to Reachy yaw (degrees)."""
+    offset = doa_rad - _DOA_FRONT
+    return max(-_YAW_RANGE_DEG, min(_YAW_RANGE_DEG,
+        -offset / _DOA_FRONT * _YAW_RANGE_DEG))
 
 
 @dataclass
@@ -27,42 +48,80 @@ class RegisteredPlayer:
     character_name: str | None = None
 
 
-def _player_positions(num_players: int) -> list[float]:
-    """Evenly space players across the yaw range."""
-    if num_players == 1:
-        return [0.0]
-    step = (SCAN_MAX_DEG - SCAN_MIN_DEG) / (num_players - 1)
-    return [SCAN_MIN_DEG + i * step for i in range(num_players)]
+def _split_yaw(total_yaw_deg: float) -> tuple[float, float]:
+    """Split a target yaw into (body_yaw_rad, head_yaw_deg).
+
+    For small angles the head does all the work. For wider angles the
+    body rotates to bring the player in front, and the head adds the
+    remaining offset.
+    """
+    if abs(total_yaw_deg) <= _HEAD_ONLY_MAX_DEG:
+        return 0.0, total_yaw_deg
+    body_deg = total_yaw_deg - math.copysign(_HEAD_ONLY_MAX_DEG * 0.5, total_yaw_deg)
+    head_deg = total_yaw_deg - body_deg
+    body_rad = np.deg2rad(body_deg)
+    return float(body_rad), head_deg
+
+
+def _wait_for_voice(robot, timeout: float = DOA_TIMEOUT_S) -> float | None:
+    """Poll DoA until speech is detected. Returns the angle in radians, or None."""
+    start = time.monotonic()
+    while (time.monotonic() - start) < timeout:
+        result = robot.media.get_DoA()
+        if result is not None:
+            angle, speech = result
+            if speech:
+                return angle
+        time.sleep(DOA_POLL_S)
+    return None
 
 
 def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
-    """Rotate to each player position and ask for their name."""
+    """Locate each player by voice (DoA), then ask their name."""
     from src import voice_input
 
-    print("\n  Player Registration")
+    print("\n  Player Registration (DoA)")
     print("  " + "=" * 40)
-    voice.announce("Let me meet everyone!")
+    voice.announce("Let me meet everyone! I'll find you by your voice.")
 
-    positions = _player_positions(num_players)
     players: list[RegisteredPlayer] = []
 
-    for i, yaw in enumerate(positions):
-        pose = create_head_pose(pitch=0, yaw=yaw, roll=0, degrees=True, mm=True)
-        robot.goto_target(head=pose, duration=0.6)
+    for i in range(1, num_players + 1):
+        voice.announce(f"Player {i}, please say hello!")
+        print(f"  Waiting for player {i} to speak...")
+
+        doa_angle = _wait_for_voice(robot)
+
+        if doa_angle is not None:
+            yaw = doa_to_yaw_deg(doa_angle)
+            logger.info("Player %d: DoA=%.2f rad -> yaw=%.1f°", i, doa_angle, yaw)
+        else:
+            yaw = 0.0
+            logger.warning("No voice detected for player %d — defaulting to front.", i)
+
+        # Rotate body + head toward the player
+        body_rad, head_deg = _split_yaw(yaw)
+        pose = create_head_pose(pitch=0, yaw=head_deg, roll=0, degrees=True, mm=True)
+        robot.goto_target(head=pose, body_yaw=body_rad, duration=0.6)
         time.sleep(0.7)
 
-        voice.announce(f"Hello, player {i + 1}! What should I call you?")
+        if voice.emotions:
+            voice.emotions.set_base_yaw(head_deg)
         name = voice_input.ask_text("What should I call you?")
         if not name:
-            name = f"Player {i + 1}"
+            name = f"Player {i}"
 
+        if voice.emotions:
+            voice.emotions.set_base_yaw(head_deg)
         voice.announce(f"Nice to meet you, {name}!")
         players.append(RegisteredPlayer(real_name=name, yaw_deg=yaw))
-        print(f"  Player {i + 1}: {name} (yaw: {yaw:.0f}°)")
+        print(f"  Player {i}: {name} (yaw: {yaw:.0f}°)")
 
-    # Return to center
+    # Return to center (body + head)
+    if voice.emotions:
+        voice.emotions.set_base_yaw(0.0)
     neutral = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)
-    robot.goto_target(head=neutral, duration=0.5)
+    robot.goto_target(head=neutral, body_yaw=0.0, duration=0.5)
     time.sleep(0.5)
 
     names = ", ".join(p.real_name for p in players)
@@ -83,14 +142,64 @@ def assign_characters(
     return registry
 
 
-def face_player(robot, player: RegisteredPlayer, duration: float = 0.6):
-    """Turn Reachy's head toward the given player's stored position."""
-    pose = create_head_pose(pitch=0, yaw=player.yaw_deg, roll=0, degrees=True, mm=True)
-    robot.goto_target(head=pose, duration=duration)
+class PlayerSweep:
+    """Slowly rotate between player positions in a background thread."""
+
+    def __init__(self, robot, players: list[RegisteredPlayer]):
+        self._robot = robot
+        self._players = players
+        self._running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        if len(self._players) < 2:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+
+    def _loop(self):
+        idx = 0
+        direction = 1
+        try:
+            while self._running:
+                p = self._players[idx]
+                body_rad, head_deg = _split_yaw(p.yaw_deg)
+                pose = create_head_pose(
+                    pitch=random.uniform(-2, 2),
+                    yaw=head_deg,
+                    roll=0,
+                    degrees=True, mm=True,
+                )
+                self._robot.goto_target(
+                    head=pose, body_yaw=body_rad, duration=1.2,
+                )
+                time.sleep(1.5)
+                if not self._running:
+                    break
+                idx += direction
+                if idx >= len(self._players) or idx < 0:
+                    direction *= -1
+                    idx += direction
+        except Exception:
+            pass
+
+
+def face_player(robot, player: RegisteredPlayer, duration: float = 0.8):
+    """Rotate Reachy's body + head toward the given player."""
+    body_rad, head_deg = _split_yaw(player.yaw_deg)
+    pose = create_head_pose(pitch=0, yaw=head_deg, roll=0, degrees=True, mm=True)
+    robot.goto_target(head=pose, body_yaw=body_rad, duration=duration)
     time.sleep(duration + 0.1)
 
 
-def face_neutral(robot, duration: float = 0.4):
-    """Return Reachy's head to neutral (facing front)."""
+def face_neutral(robot, duration: float = 0.5):
+    """Return Reachy's body + head to neutral (facing front)."""
     pose = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)
-    robot.goto_target(head=pose, duration=duration)
+    robot.goto_target(head=pose, body_yaw=0.0, duration=duration)

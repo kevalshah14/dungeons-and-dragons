@@ -245,8 +245,20 @@ class GameVoice:
         self._speak(text, self.voice_map.get("narrator", NARRATOR_VOICE))
 
     def say(self, character_name: str, text: str):
-        voice = self.voice_map.get(character_name, NARRATOR_VOICE)
-        self._speak(text, voice)
+        narrator = self.voice_map.get("narrator", NARRATOR_VOICE)
+        self._speak(f"{character_name} says", narrator)
+        character_voice = self._resolve_voice(character_name)
+        self._speak(text, character_voice)
+
+    def _resolve_voice(self, character_name: str) -> str:
+        """Return a consistent voice for a character, auto-assigning one if new."""
+        if character_name in self.voice_map:
+            return self.voice_map[character_name]
+        used = set(self.voice_map.values())
+        voice = assign_npc_voice("male", "", used)
+        self.voice_map[character_name] = voice
+        print(f"  [TTS] Auto-assigned voice for new character '{character_name}': {voice}")
+        return voice
 
     def announce(self, text: str):
         """Short DM announcement (turn calls, roll results)."""

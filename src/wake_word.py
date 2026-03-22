@@ -1,5 +1,5 @@
 """
-Wake word detection — "Hey Reachy".
+Wake word detection — "Dungeon Master".
 
 Continuously records short snippets from the mic (Reachy or system)
 and sends them to Gemini for transcription. Triggers when the
@@ -9,8 +9,9 @@ transcription contains a wake phrase.
 from src.audio import listen, listen_reachy
 
 WAKE_PHRASES = [
-    "hey reachy", "hey reachie", "hey reechy", "a reachy",
-    "hey richi", "hey reach", "hey richie", "hey richy",
+    "dungeon master", "dungeon masters", "dungeonmaster",
+    "dungeon muster", "dungeon monster", "dunjon master",
+    "hey dungeon master", "hey dungeon",
 ]
 
 _robot = None
@@ -23,8 +24,8 @@ def set_robot(reachy_mini):
 
 
 def wait_for_wake_word():
-    """Block until 'Hey Reachy' is detected."""
-    print("  Listening for 'Hey Reachy'...")
+    """Block until 'Dungeon Master' is detected."""
+    print("  Listening for 'Dungeon Master'...")
     while True:
         if _robot is not None:
             text = listen_reachy(_robot)

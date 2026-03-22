@@ -24,6 +24,7 @@ from reachy_mini.utils import create_head_pose
 from src.dungeon_master import DungeonMaster
 from src.models import DynamicScene, GameState
 from src.player_registry import (
+    PlayerSweep,
     RegisteredPlayer,
     assign_characters,
     face_neutral,
@@ -156,11 +157,30 @@ def present_scene(
     print(f"  {'='*50}")
     print(f"\n  {scene.narrative}\n")
 
+    # Sweep between players while narrating (replaces talking animation)
+    sweep = None
+    if registry:
+        saved_emotions = voice.emotions
+        voice.emotions = None
+        sweep = PlayerSweep(robot, list(registry.values()))
+        sweep.start()
+
     voice.narrate(scene.narrative)
+
+    if sweep:
+        sweep.stop()
+        voice.emotions = saved_emotions
+
     emotions.wait_for_emotion()
 
     for line in scene.dialogue:
         print(f"  {line.character}: \"{line.line}\"")
+        if registry and line.character in registry:
+            rp = registry[line.character]
+            face_player(robot, rp)
+            emotions.set_base_yaw(rp.yaw_deg)
+        else:
+            emotions.set_base_yaw(0.0)
         voice.say(line.character, line.line)
 
     active = scene.active_player
@@ -174,11 +194,13 @@ def present_scene(
     if registry and active in registry:
         rp = registry[active]
         face_player(robot, rp)
+        emotions.set_base_yaw(rp.yaw_deg)
         real_name = rp.real_name
         print(f"\n  >> {real_name} as {active}'s turn (HP: {hp})")
         situation_text = f"{real_name}, as {active}. {scene.situation}"
     else:
         real_name = active
+        emotions.set_base_yaw(0.0)
         print(f"\n  >> {active}'s turn (HP: {hp})")
         situation_text = f"{active}, {scene.situation}"
 
@@ -195,7 +217,7 @@ def present_scene(
             f"Option {i}, {opt.description}"
             for i, opt in enumerate(scene.options, 1)
         )
-        voice.announce(f"Your choices are: {options_speech}")
+        voice.announce(f"Your choices are: {options_speech}. What do you choose?")
 
 
 def handle_turn(
@@ -346,6 +368,7 @@ def run_game(
             char = next((c for c in game.party.players if c.name == char_name), None)
             if char:
                 face_player(robot, rp)
+                emotions.set_base_yaw(rp.yaw_deg)
                 intro = (
                     f"{rp.real_name}, you will play as {char.name}, "
                     f"a {char.gender} {char.race.value} {char.character_class.value}! "
@@ -355,6 +378,7 @@ def run_game(
                 print(f"  {rp.real_name} -> {char.name}: {char.race.value} {char.character_class.value}")
                 time.sleep(0.3)
 
+        emotions.set_base_yaw(0.0)
         face_neutral(robot)
     else:
         for p in game.party.players:
@@ -437,7 +461,7 @@ def print_banner():
     ║              Reachy Mini + Gemini + Minimax               ║
     ║                                                          ║
     ║   Reachy mic → Gemini STT → Gemini DM → Minimax TTS     ║
-    ║                Say "Hey Reachy" to begin!                 ║
+    ║              Say "Dungeon Master" to begin!                ║
     ║                                                          ║
     ╚══════════════════════════════════════════════════════════╝
     """
@@ -480,15 +504,15 @@ def main():
 
         # Reachy sleeps until woken up.
         sleep_pose = create_head_pose(pitch=-20, yaw=0, roll=0, degrees=True, mm=True)
-        robot.goto_target(head=sleep_pose, duration=1.5)
+        robot.goto_target(head=sleep_pose, body_yaw=None, duration=1.5)
         time.sleep(1.5)
-        print("  Reachy is sleeping... say 'Hey Reachy' to wake up!\n")
+        print("  Reachy is sleeping... say 'Dungeon Master' to wake up!\n")
 
         wait_for_wake_word()
 
         # Wake up!
         awake_pose = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)
-        robot.goto_target(head=awake_pose, duration=0.5)
+        robot.goto_target(head=awake_pose, body_yaw=None, duration=0.5)
         time.sleep(0.5)
         emotions.play_emotion("cheerful1")
 
