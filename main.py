@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 from reachy_mini import ReachyMini
 
+from reachy_mini.utils import create_head_pose
+
 from src.dungeon_master import DungeonMaster
 from src.models import DynamicScene, GameState
 from src.reachy_emotions import ReachyEmotions, classify_scene
@@ -416,7 +418,19 @@ def main():
         voice_input.set_robot(robot)
         set_wake_robot(robot)
 
+        # Reachy sleeps until woken up.
+        sleep_pose = create_head_pose(pitch=-20, yaw=0, roll=0, degrees=True, mm=True)
+        robot.goto_target(head=sleep_pose, duration=1.5)
+        time.sleep(1.5)
+        print("  Reachy is sleeping... say 'Hey Reachy' to wake up!\n")
+
         wait_for_wake_word()
+
+        # Wake up!
+        awake_pose = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)
+        robot.goto_target(head=awake_pose, duration=0.5)
+        time.sleep(0.5)
+        emotions.play_emotion("cheerful1")
 
         num_players, theme = run_onboarding(robot, voice)
 
