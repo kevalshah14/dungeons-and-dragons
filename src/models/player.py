@@ -16,6 +16,7 @@ class AbilityScores(BaseModel):
 
 class Player(BaseModel):
     name: str = Field(description="The character's full name.")
+    gender: str = Field(description="'male' or 'female'.")
     race: Race = Field(description="The character's race/species.")
     character_class: CharacterClass = Field(description="The character's class (their 'job').")
     backstory: str = Field(description="A compelling backstory that ties into the adventure.")

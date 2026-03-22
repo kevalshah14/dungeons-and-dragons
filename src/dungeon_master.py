@@ -1,29 +1,119 @@
 from google import genai
 from google.genai import types
 
-from src.models import Story, Party, GameTree, GameState
+from src.models import Story, Party, DynamicScene, TurnRecord, GameState
 
 MODEL = "gemini-3-flash-preview"
 
 SYSTEM_INSTRUCTION = """\
-You are an expert Dungeons & Dragons 5th Edition Dungeon Master with decades of experience \
-crafting immersive, balanced, and memorable adventures. You create content that is:
+You are a Dungeons & Dragons Dungeon Master telling a story. \
+You speak in simple words but you tell the story like a real book.
 
-- Rich in vivid, atmospheric descriptions that bring the world to life
-- Balanced for the number of players -- more players means tougher enemies but also more \
-  complex social dynamics and branching paths
-- True to D&D 5e mechanics (ability scores, armor class, hit points, difficulty classes)
-- Full of meaningful choices where no option is obviously "correct"
-- Respectful of player agency -- every choice should feel impactful
+HOW TO WRITE THE NARRATIVE:
+- You are a storyteller. The narrative is a chapter of the adventure.
+- Write 3-6 short, simple sentences. Use easy words a kid could understand.
+- Describe what happened because of the LAST player's action. Show the result.
+- Use sounds: CRASH, WHOOSH, SNAP, THUD, CLANG, SPLASH.
+- Use feelings: scared, brave, tired, excited, proud, worried.
+- Show how one player's action affects everyone. If Kael broke a door, \
+  describe the door flying open and what Pippin sees on the other side.
+- End the narrative by turning the spotlight to the NEXT active player. \
+  Show what they see, hear, or face right now. This sets up their choices.
 
-When generating characters, ensure the party is well-balanced with a mix of combat, \
-magic, stealth, and social abilities. Each character should have a unique personality \
-and a backstory that ties into the adventure's plot hooks.
+EXAMPLE OF GOOD NARRATIVE:
+"Kael brings his sword down on the lock -- CLANG! Sparks fly everywhere. \
+The chain snaps and the gate swings open with a long, loud creak. \
+Pippin's eyes go wide. On the other side, three goblins sit around a campfire. \
+They haven't noticed the noise yet. Pippin is closest to the shadows."
 
-When building decision trees, create branching narratives where choices genuinely matter. \
-Include a mix of combat encounters, social encounters, puzzles, and exploration. \
-Every branch should eventually lead to a satisfying conclusion -- whether victory, \
-defeat, or something bittersweet.
+EXAMPLE OF BAD NARRATIVE:
+"Kael broke the lock. The gate opened. There are goblins inside."
+
+PICKING WHO ACTS:
+- You choose ONE player to act each turn. Set their name as "active_player".
+- Pick whoever the story naturally focuses on right now.
+- Alternate between players. Don't let one player go 3 times in a row.
+- Sometimes a player's action creates a situation for the OTHER player. Use that!
+  * Kael kicks open a door -> now Pippin is face-to-face with the enemy.
+  * Pippin sneaks ahead and finds a trap -> now Kael must decide how to cross it.
+- If a player got hurt or failed, maybe give them a chance to recover next.
+- If a player has been waiting, it's their moment to shine.
+
+DICE ROLL RULES:
+- Only add ability_check + difficulty_class to RISKY or HARD actions.
+- Risky: fighting, sneaking past enemies, picking a lock, casting a hard spell, \
+  climbing, jumping, persuading a hostile NPC.
+- Safe (no roll): talking to friends, looking around, walking somewhere safe, \
+  picking up items, resting.
+- Each turn should have at least one safe option and one risky option.
+- DCs: 10 = easy, 12 = medium, 15 = hard, 18 = very hard.
+- Set damage_on_fail for dangerous actions (combat, traps): \
+  light 1-3, medium 4-6, heavy 7-10, deadly 10+.
+
+D&D 5e RULES:
+- Ability checks: d20 + ability modifier + proficiency (+2).
+- Natural 20 = CRITICAL HIT. Describe something epic and cool.
+- Natural 1 = FUMBLE. Describe something funny and silly.
+- HP matters. If a player is hurt, the narrative should mention it.
+- If a player hits 0 HP, they are knocked out and can't act.
+
+CHARACTER DIALOGUE:
+- When a character SPEAKS in a scene, add their line to the "dialogue" list.
+- This includes NPCs, villains, quest givers, and player characters reacting.
+- Each dialogue line has "character" (exact name) and "line" (what they say).
+- Write dialogue that fits the character's personality:
+  * Villains: mean, taunting, threatening
+  * Quest givers: worried, grateful, urgent
+  * Merchants: friendly, funny, sales-pitch
+  * Players: match their personality traits (brave, sarcastic, scared, etc.)
+- 1-3 dialogue lines per scene. Not every scene needs dialogue.
+- Use dialogue when it makes the scene feel alive:
+  * An NPC warns the players about danger
+  * The villain taunts them from across the room
+  * A player character says something funny or brave
+  * Someone cries for help
+
+STORY RULES:
+- Every scene must connect to the last one. The story is one flowing adventure.
+- The choices a player makes should change what happens next. No dead choices.
+- Build tension over time. Start easy, get harder.
+- After 8-12 turns, steer toward the final showdown.
+- Mix types of scenes: combat, puzzles, talking, exploring, sneaking.
+- Throw in surprises and twists. Maybe an NPC shows up. Maybe the ground shakes.
+- Use the NPCs and locations from the story. Make them show up and matter.
+"""
+
+
+def _build_dm_system_prompt(story: Story, party: Party) -> str:
+    player_details = "\n".join(
+        f"  - {p.name} ({p.gender}, {p.race.value} {p.character_class.value}): "
+        f"STR {p.ability_scores.strength}, DEX {p.ability_scores.dexterity}, "
+        f"CON {p.ability_scores.constitution}, INT {p.ability_scores.intelligence}, "
+        f"WIS {p.ability_scores.wisdom}, CHA {p.ability_scores.charisma} | "
+        f"HP {p.hit_points}, AC {p.armor_class} | "
+        f"Abilities: {', '.join(p.abilities[:3])} | "
+        f"Personality: {', '.join(p.personality_traits[:2])}"
+        for p in party.players
+    )
+
+    return f"""{SYSTEM_INSTRUCTION}
+
+THE ADVENTURE:
+Title: {story.title}
+Setting: {story.setting}
+Backstory: {story.backstory}
+Quest: {story.main_quest}
+
+LOCATIONS:
+{chr(10).join(f"  - {loc.name}: {loc.description}" for loc in story.key_locations)}
+
+NPCs:
+{chr(10).join(f"  - {npc.name} ({npc.gender}, {npc.role}): {npc.description}. Wants: {npc.motivation}" for npc in story.key_npcs)}
+
+THE PARTY ({len(party.players)} players):
+{player_details}
+
+Player names you can pick as active_player: {', '.join(p.name for p in party.players)}.
 """
 
 
@@ -31,23 +121,25 @@ class DungeonMaster:
     def __init__(self, api_key: str | None = None):
         kwargs = {"api_key": api_key} if api_key else {}
         self.client = genai.Client(**kwargs)
+        self._chat = None
+        self._config = None
 
     def create_story(self, num_players: int, theme: str | None = None) -> Story:
-        """Generate a complete adventure story scaled for the given number of players."""
         theme_line = f"Theme/tone requested: {theme}" if theme else "Choose an exciting theme."
 
         prompt = f"""\
-Create a Dungeons & Dragons adventure for {num_players} player(s).
+Create a fun D&D adventure for {num_players} player(s).
 
 {theme_line}
 
 Requirements:
-- Exactly {num_players} plot hook(s), one to personally draw in each player character
-- 3-5 key locations that the adventure spans across
-- 2-4 important NPCs including at least one antagonist
-- Scale the difficulty appropriately: {num_players} player(s) means \
-{"a tightly focused, personal story" if num_players <= 2 else "a grand, multi-threaded adventure with complex dynamics"}
-- The story should be completable in 3-6 sessions
+- Exactly {num_players} plot hook(s), one per player -- 1-2 sentences each
+- 3-5 locations that the players will visit in order -- describe each in 1-2 sentences
+- 2-4 NPCs including a villain -- each NPC MUST have a gender ("male" or "female"). Describe them like you'd describe someone to a friend
+- A short backstory (3-4 sentences) that sets up why the quest matters
+- One clear main quest goal
+- Use simple everyday words. No fancy fantasy language.
+- The locations should tell a journey: start somewhere safe, travel through danger, reach the goal.
 """
 
         response = self.client.models.generate_content(
@@ -63,29 +155,27 @@ Requirements:
         return Story.model_validate_json(response.text)
 
     def create_party(self, story: Story, num_players: int) -> Party:
-        """Generate a balanced party of player characters tied to the story."""
         prompt = f"""\
-Create {num_players} player character(s) for the following D&D adventure:
+Create {num_players} player character(s) for this adventure:
 
 Title: {story.title}
 Setting: {story.setting}
-Backstory: {story.backstory}
 Main Quest: {story.main_quest}
 
 Plot hooks (one per character):
 {chr(10).join(f"- Player {i+1}: {hook}" for i, hook in enumerate(story.hooks))}
 
-Key NPCs:
-{chr(10).join(f"- {npc.name} ({npc.role}): {npc.description}" for npc in story.key_npcs)}
-
 Requirements:
-- Create exactly {num_players} character(s) at level 1
-- Each character's backstory MUST tie into their corresponding plot hook
-- Ensure the party is balanced (mix of melee, ranged, magic, support)
-- Use standard 5e ability score generation (scores between 8-18, with racial bonuses)
-- Give each character 2-3 distinctive personality traits
-- Starting equipment should be appropriate for their class
-- Hit points and armor class should follow 5e rules for level 1 characters
+- Exactly {num_players} character(s) at level 1
+- Each character MUST have a gender ("male" or "female"). Mix genders for variety.
+- Each backstory: 1-2 sentences connecting to their hook
+- Different classes that complement each other (fighter + rogue, wizard + cleric, etc.)
+- Ability scores 8-18. High stats match the class.
+- 2-3 fun personality traits that affect how they act
+- Correct starting gear, HP, and AC for their class
+- List 2-3 class abilities
+- Simple language everywhere
+- Give them a relationship to each other (friends, siblings, rivals, etc.)
 """
 
         response = self.client.models.generate_content(
@@ -100,58 +190,36 @@ Requirements:
 
         return Party.model_validate_json(response.text)
 
-    def create_game_tree(self, story: Story, party: Party) -> GameTree:
-        """Generate a branching decision tree for how the adventure can unfold."""
-        player_summary = "\n".join(
-            f"- {p.name} ({p.race.value} {p.character_class.value}): {p.backstory[:100]}..."
-            for p in party.players
+    def start_session(self, story: Story, party: Party):
+        system_prompt = _build_dm_system_prompt(story, party)
+
+        self._config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_json_schema=DynamicScene.model_json_schema(),
         )
 
-        prompt = f"""\
-Create a branching decision tree for the following D&D adventure:
+        self._chat = self.client.chats.create(model=MODEL, config=self._config)
 
-STORY:
-Title: {story.title}
-Setting: {story.setting}
-Main Quest: {story.main_quest}
-Backstory: {story.backstory}
+    def get_first_scene(self) -> DynamicScene:
+        if not self._chat:
+            raise RuntimeError("Call start_session() first.")
 
-LOCATIONS:
-{chr(10).join(f"- {loc.name}: {loc.description}" for loc in story.key_locations)}
-
-NPCs:
-{chr(10).join(f"- {npc.name} ({npc.role}): {npc.motivation}" for npc in story.key_npcs)}
-
-PARTY:
-{player_summary}
-
-Requirements:
-- Start with an opening scene (root) that sets the stage
-- Create 8-12 scenes total forming a branching tree
-- Each non-ending scene should have 2-3 meaningful choices
-- Include at least 2 victory endings, 1 defeat ending, and 1 bittersweet ending
-- Some choices should require dice checks (with appropriate DCs)
-- Reference specific locations and NPCs from the story
-- The critical path (shortest route to an ending) should be 4-5 scenes
-- Ensure scene_ids are consistent: use 'scene_1', 'scene_2a', 'scene_2b', etc.
-- Every choice's 'leads_to' must reference a valid scene_id
-- Make choices that feel genuinely different -- not just "door A or door B"
-"""
-
-        response = self.client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_json_schema=GameTree.model_json_schema(),
-            ),
+        response = self._chat.send_message(
+            "Begin the adventure. Write the opening scene like the first page of a book. "
+            "Set the mood, introduce what the players see. "
+            "Pick one player to act first -- whoever the story naturally starts with."
         )
+        return DynamicScene.model_validate_json(response.text)
 
-        return GameTree.model_validate_json(response.text)
+    def play_turn(self, action_summary: str) -> DynamicScene:
+        if not self._chat:
+            raise RuntimeError("Call start_session() first.")
+
+        response = self._chat.send_message(action_summary)
+        return DynamicScene.model_validate_json(response.text)
 
     def create_game(self, num_players: int, theme: str | None = None) -> GameState:
-        """Run the full pipeline: story -> party -> game tree."""
         print(f"\n{'='*60}")
         print(f"  The Dungeon Master is crafting your adventure...")
         print(f"  Players: {num_players}")
@@ -159,27 +227,18 @@ Requirements:
             print(f"  Theme: {theme}")
         print(f"{'='*60}\n")
 
-        print("[1/3] Weaving the story...")
+        print("[1/2] Writing the story...")
         story = self.create_story(num_players, theme)
         print(f"  -> \"{story.title}\" -- {story.setting}")
         print(f"  -> Difficulty: {story.difficulty.value}")
         print()
 
-        print("[2/3] Creating the heroes...")
+        print("[2/2] Creating the heroes...")
         party = self.create_party(story, num_players)
         for p in party.players:
-            print(f"  -> {p.name} -- {p.race.value} {p.character_class.value} (HP: {p.hit_points})")
+            print(f"  -> {p.name} -- {p.gender} {p.race.value} {p.character_class.value} (HP: {p.hit_points}, AC: {p.armor_class})")
         print()
 
-        print("[3/3] Building the decision tree...")
-        game_tree = self.create_game_tree(story, party)
-        print(f"  -> {len(game_tree.scenes)} scenes, {game_tree.total_endings} endings")
-        print(f"  -> Shortest path: {game_tree.critical_path_length} scenes")
-        print()
-
-        return GameState(
-            story=story,
-            party=party,
-            game_tree=game_tree,
-            current_scene_id=game_tree.root_scene_id,
-        )
+        game = GameState(story=story, party=party)
+        game.init_hp()
+        return game

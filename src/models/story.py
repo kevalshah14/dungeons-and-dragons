@@ -5,6 +5,7 @@ from src.models.enums import Difficulty
 
 class NPC(BaseModel):
     name: str = Field(description="The NPC's full name.")
+    gender: str = Field(description="'male' or 'female'.")
     role: str = Field(description="Their role in the story (e.g. 'villain', 'quest giver', 'merchant').")
     description: str = Field(description="A brief physical and personality description.")
     motivation: str = Field(description="What drives this NPC.")
