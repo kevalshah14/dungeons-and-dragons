@@ -23,6 +23,13 @@ from reachy_mini.utils import create_head_pose
 
 from src.dungeon_master import DungeonMaster
 from src.models import DynamicScene, GameState
+from src.player_registry import (
+    RegisteredPlayer,
+    assign_characters,
+    face_neutral,
+    face_player,
+    scan_all_players,
+)
 from src.reachy_emotions import ReachyEmotions, classify_scene
 from src.tts import GameVoice
 from src import voice_input
@@ -132,7 +139,14 @@ def get_modifier_for_ability(player, ability_name: str) -> int:
     return ability_modifier(score)
 
 
-def present_scene(scene: DynamicScene, game: GameState, voice: GameVoice, emotions: ReachyEmotions):
+def present_scene(
+    robot,
+    scene: DynamicScene,
+    game: GameState,
+    voice: GameVoice,
+    emotions: ReachyEmotions,
+    registry: dict[str, RegisteredPlayer] | None = None,
+):
     """Narrate the scene, play dialogue, and announce options."""
     mood = classify_scene(scene.narrative)
     emotions.play_scene_emotion(mood)
@@ -153,10 +167,22 @@ def present_scene(scene: DynamicScene, game: GameState, voice: GameVoice, emotio
     player_obj = next((p for p in game.party.players if p.name == active), None)
     hp = game.get_hp(active) if player_obj else "?"
 
-    print(f"\n  >> {active}'s turn (HP: {hp})")
-    print(f"  {scene.situation}\n")
+    # Let voice_input know who the active character is
+    voice_input.set_active_character(active)
 
-    situation_text = f"{active}, {scene.situation}"
+    # Turn toward the active player
+    if registry and active in registry:
+        rp = registry[active]
+        face_player(robot, rp)
+        real_name = rp.real_name
+        print(f"\n  >> {real_name} as {active}'s turn (HP: {hp})")
+        situation_text = f"{real_name}, as {active}. {scene.situation}"
+    else:
+        real_name = active
+        print(f"\n  >> {active}'s turn (HP: {hp})")
+        situation_text = f"{active}, {scene.situation}"
+
+    print(f"  {scene.situation}\n")
     voice.announce(situation_text)
 
     if scene.options:
@@ -178,6 +204,7 @@ def handle_turn(
     game: GameState,
     voice: GameVoice,
     emotions: ReachyEmotions,
+    registry: dict[str, RegisteredPlayer] | None = None,
 ) -> str:
     """Get player choice, resolve dice roll via antenna pull, return action summary."""
     if not scene.options:
@@ -191,8 +218,11 @@ def handle_turn(
     active = scene.active_player
     player_obj = next((p for p in game.party.players if p.name == active), None)
 
-    print(f"\n  {active} chose: {chosen.description}")
-    voice.announce(f"{active} chooses to {chosen.description}")
+    # Use real name when addressing
+    real_name = registry[active].real_name if registry and active in registry else active
+
+    print(f"\n  {real_name} as {active} chose: {chosen.description}")
+    voice.announce(f"{real_name} chooses to {chosen.description}")
 
     summary_parts = [f"{active} chose: {chosen.description}."]
 
@@ -287,7 +317,14 @@ def handle_turn(
 # Full game run
 # ---------------------------------------------------------------------------
 
-def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_players: int, theme: str | None):
+def run_game(
+    robot: ReachyMini,
+    voice: GameVoice,
+    emotions: ReachyEmotions,
+    num_players: int,
+    theme: str | None,
+    players: list | None = None,
+):
     """Run the D&D game with Gemini + Minimax TTS."""
     print("\n  Phase 2: The Adventure Begins!")
     print("  " + "=" * 50)
@@ -298,13 +335,35 @@ def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_
     game = dm.create_game(num_players, theme)
     voice.setup_voices(game.party, game.story)
 
-    for p in game.party.players:
-        intro = (
-            f"{p.name}, a {p.gender} {p.race.value} {p.character_class.value}. "
-            f"{p.backstory}"
-        )
-        voice.say(p.name, intro)
-        print(f"  {p.name}: {p.race.value} {p.character_class.value} — {p.backstory}")
+    # Map real players to characters
+    registry: dict[str, RegisteredPlayer] | None = None
+    if players:
+        registry = assign_characters(players, game.party)
+        voice.set_registry(registry)
+        voice_input.set_registry(registry)
+
+        for char_name, rp in registry.items():
+            char = next((c for c in game.party.players if c.name == char_name), None)
+            if char:
+                face_player(robot, rp)
+                intro = (
+                    f"{rp.real_name}, you will play as {char.name}, "
+                    f"a {char.gender} {char.race.value} {char.character_class.value}! "
+                    f"{char.backstory}"
+                )
+                voice.announce(intro)
+                print(f"  {rp.real_name} -> {char.name}: {char.race.value} {char.character_class.value}")
+                time.sleep(0.3)
+
+        face_neutral(robot)
+    else:
+        for p in game.party.players:
+            intro = (
+                f"{p.name}, a {p.gender} {p.race.value} {p.character_class.value}. "
+                f"{p.backstory}"
+            )
+            voice.say(p.name, intro)
+            print(f"  {p.name}: {p.race.value} {p.character_class.value} — {p.backstory}")
 
     voice.announce(
         f"Your quest: {game.story.main_quest}. Let the adventure begin!"
@@ -317,7 +376,7 @@ def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_
     game.turn_number = 1
 
     while True:
-        present_scene(scene, game, voice, emotions)
+        present_scene(robot, scene, game, voice, emotions, registry)
 
         if scene.is_ending:
             ending = scene.ending_type or "unknown"
@@ -337,7 +396,7 @@ def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_
             voice.announce("All heroes have fallen. The adventure ends in defeat.")
             break
 
-        action_summary = handle_turn(robot, scene, game, voice, emotions)
+        action_summary = handle_turn(robot, scene, game, voice, emotions, registry)
 
         game.turn_number += 1
         print(f"\n  [Turn {game.turn_number}] DM is thinking...")
@@ -359,9 +418,10 @@ def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_
                 )
                 break
 
+    face_neutral(robot)
     voice.announce("Would you like to play again?")
     if voice_input.ask_confirm("Play another adventure?"):
-        run_game(robot, voice, emotions, num_players, theme)
+        run_game(robot, voice, emotions, num_players, theme, players)
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +494,10 @@ def main():
 
         num_players, theme = run_onboarding(robot, voice)
 
-        run_game(robot, voice, emotions, num_players, theme)
+        # Player registration: scan faces + store positions
+        players = scan_all_players(robot, voice, num_players)
+
+        run_game(robot, voice, emotions, num_players, theme, players)
 
     except KeyboardInterrupt:
         logger.info("Game interrupted.")

@@ -213,12 +213,13 @@ wheels = [
 
 [[package]]
 name = "dungeons-and-dragons"
-version = "0.4.0"
+version = "0.5.0"
 source = { virtual = "." }
 dependencies = [
     { name = "google-genai", marker = "sys_platform == 'darwin'" },
     { name = "httpx", marker = "sys_platform == 'darwin'" },
     { name = "numpy", marker = "sys_platform == 'darwin'" },
+    { name = "opencv-python", marker = "sys_platform == 'darwin'" },
     { name = "pydantic", marker = "sys_platform == 'darwin'" },
     { name = "python-dotenv", marker = "sys_platform == 'darwin'" },
     { name = "reachy-mini", extra = ["mujoco"], marker = "sys_platform == 'darwin'" },
@@ -231,6 +232,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.68.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "numpy", specifier = ">=2.4.3" },
+    { name = "opencv-python", specifier = ">=4.10.0" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "reachy-mini", extras = ["mujoco"], specifier = ">=1.5.1" },

@@ -18,9 +18,12 @@ import time
 import httpx
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample
 
 MINIMAX_API_URL = "https://api.minimax.io/v1/t2a_v2"
+
+# Software gain applied before pushing audio to Reachy's speaker.
+# The XVF3800-based sound card is quiet by default; this compensates.
+REACHY_VOLUME_GAIN = 1.0
 
 NARRATOR_VOICE = "English_CaptivatingStoryteller"
 
@@ -170,6 +173,7 @@ class GameVoice:
         self._reachy_sr: int = 16000
         self._playing = False
         self.emotions = None  # set via set_emotions()
+        self._registry: dict | None = None
 
         if not self.enabled:
             print("  [TTS] Minimax keys not found -- voice disabled.")
@@ -181,7 +185,26 @@ class GameVoice:
             reachy_mini.media.start_playing()
             self._reachy_sr = reachy_mini.media.get_output_audio_samplerate()
             self._playing = True
-            print(f"  🔊 Audio routed to Reachy Mini speaker ({self._reachy_sr} Hz)")
+            self._try_max_hw_volume()
+            print(f"  🔊 Audio routed to Reachy Mini speaker ({self._reachy_sr} Hz, gain={REACHY_VOLUME_GAIN}x)")
+
+    @staticmethod
+    def _try_max_hw_volume():
+        """On Linux, try to set the reSpeaker PCM1 volume to 100%."""
+        if sys.platform != "linux":
+            return
+        try:
+            result = subprocess.run(
+                ["bash", "-c",
+                 'CARD=$(aplay -l 2>/dev/null | grep -i "reSpeaker" | head -n1 '
+                 "| sed -n 's/^card \\([0-9]*\\):.*/\\1/p'); "
+                 '[ -n "$CARD" ] && amixer -c "$CARD" set PCM,1 100% >/dev/null 2>&1'],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode == 0:
+                print("  🔊 Hardware volume set to 100% (reSpeaker PCM1)")
+        except Exception:
+            pass
 
     def stop_reachy_audio(self):
         if self._playing and self._reachy is not None:
@@ -190,7 +213,7 @@ class GameVoice:
 
     def _get_http(self) -> httpx.Client:
         if self._http is None or self._http.is_closed:
-            self._http = httpx.Client(timeout=60)
+            self._http = httpx.Client(timeout=90)
         return self._http
 
     def setup_voices(self, party, story):
@@ -208,6 +231,16 @@ class GameVoice:
                 print(f"    {npc.name:>20}  →  {tag}  ({npc.gender}, {npc.role})")
             print()
 
+    def set_registry(self, registry):
+        """Store the player registry so TTS can look up real names."""
+        self._registry = registry
+
+    def _real_name_for(self, character_name: str) -> str | None:
+        """Look up the real player name for a character, if registry is set."""
+        if self._registry and character_name in self._registry:
+            return self._registry[character_name].real_name
+        return None
+
     def narrate(self, text: str):
         self._speak(text, self.voice_map.get("narrator", NARRATOR_VOICE))
 
@@ -218,6 +251,19 @@ class GameVoice:
     def announce(self, text: str):
         """Short DM announcement (turn calls, roll results)."""
         self._speak(text, self.voice_map.get("narrator", NARRATOR_VOICE))
+
+    def address_player(self, character_name: str, text: str):
+        """Address a player by their real name, speaking as narrator.
+
+        Example output: "Keval, as Elara -- what do you do?"
+        Falls back to character name if registry is not set.
+        """
+        real_name = self._real_name_for(character_name)
+        if real_name:
+            speech = f"{real_name}, as {character_name}. {text}"
+        else:
+            speech = f"{character_name}, {text}"
+        self._speak(speech, self.voice_map.get("narrator", NARRATOR_VOICE))
 
     def _speak(self, text: str, voice_id: str):
         if not self.enabled:
@@ -234,7 +280,7 @@ class GameVoice:
         if since_last < 0.3:
             time.sleep(0.3 - since_last)
 
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries + 1):
             try:
                 audio_bytes = self._synthesize(text, voice_id)
@@ -249,13 +295,16 @@ class GameVoice:
                 if self.emotions:
                     self.emotions.stop_talking()
                 if attempt < max_retries:
-                    wait = 1.0 * (attempt + 1)
-                    print(f"  [TTS] Retry {attempt + 1}/{max_retries} in {wait:.0f}s ({e})")
+                    wait = min(2 ** attempt, 8)
+                    print(f"  [TTS] Retry {attempt + 1}/{max_retries} in {wait}s ({e})")
                     time.sleep(wait)
                 else:
                     print(f"  [TTS] Skipped after {max_retries + 1} attempts: {e}")
 
     def _synthesize(self, text: str, voice_id: str) -> bytes:
+        # Request audio at Reachy's native rate to skip costly resampling
+        synth_sr = self._reachy_sr if self._reachy is not None else 32000
+
         payload = {
             "model": "speech-02-turbo",
             "text": text,
@@ -264,18 +313,19 @@ class GameVoice:
             "output_format": "hex",
             "voice_setting": {
                 "voice_id": voice_id,
-                "speed": 0.95,
-                "vol": 1,
+                "speed": 1.0,
+                "vol": 5,
                 "pitch": 0,
             },
             "audio_setting": {
-                "sample_rate": 32000,
+                "sample_rate": synth_sr,
                 "bitrate": 128000,
                 "format": "mp3",
                 "channel": 1,
             },
         }
 
+        t0 = time.time()
         client = self._get_http()
         response = client.post(
             MINIMAX_API_URL,
@@ -287,6 +337,7 @@ class GameVoice:
         )
         response.raise_for_status()
         data = response.json()
+        synth_ms = int((time.time() - t0) * 1000)
 
         if data.get("base_resp", {}).get("status_code", 0) != 0:
             msg = data.get("base_resp", {}).get("status_msg", "Unknown error")
@@ -296,6 +347,7 @@ class GameVoice:
         if not hex_audio:
             raise RuntimeError("No audio data in response")
 
+        print(f"  [TTS] synth={synth_ms}ms sr={synth_sr} len={len(text)}ch")
         return bytes.fromhex(hex_audio)
 
     def _play(self, audio_bytes: bytes):
@@ -311,12 +363,14 @@ class GameVoice:
 
         if sr != self._reachy_sr:
             n_out = int(round(self._reachy_sr * len(data) / sr))
-            data = resample(data, n_out).astype(np.float32)
+            x_old = np.linspace(0, 1, len(data))
+            x_new = np.linspace(0, 1, n_out)
+            data = np.interp(x_new, x_old, data).astype(np.float32)
 
-        # Reachy expects stereo (Nx2)
+        data = np.clip(data * REACHY_VOLUME_GAIN, -1.0, 1.0)
         stereo = np.column_stack((data, data))
 
-        chunk_size = self._reachy_sr // 10  # 100ms chunks
+        chunk_size = self._reachy_sr // 5  # 200ms chunks (less push overhead)
         for i in range(0, len(stereo), chunk_size):
             chunk = stereo[i : i + chunk_size]
             self._reachy.media.push_audio_sample(chunk)

@@ -32,6 +32,7 @@ REACHY_SILENCE_TIMEOUT_S = 1.2
 REACHY_MAX_SPEECH_S = 10.0
 REACHY_POLL_S = 0.005
 REACHY_WAIT_TIMEOUT_S = 15.0
+REACHY_CONFIRM_FRAMES = 2  # consecutive loud frames needed before counting as speech
 
 STT_MODEL = "gemini-2.5-flash"
 
@@ -148,6 +149,8 @@ def record_speech_reachy(
     logger.debug("Reachy mic sample rate: %d Hz", reachy_sr)
 
     chunks: list[np.ndarray] = []
+    pending: list[np.ndarray] = []  # buffered frames waiting to confirm speech
+    loud_streak = 0
     silent_time = 0.0
     speaking = False
     speech_time = 0.0
@@ -173,11 +176,18 @@ def record_speech_reachy(
 
         if energy > REACHY_ENERGY_THRESHOLD:
             if not speaking:
-                logger.debug("Speech detected (energy=%.4f)", energy)
-            speaking = True
-            silent_time = 0.0
-            chunks.append(flat)
-            speech_time += frame_dur
+                loud_streak += 1
+                pending.append(flat)
+                if loud_streak >= REACHY_CONFIRM_FRAMES:
+                    speaking = True
+                    chunks.extend(pending)
+                    speech_time += sum(len(p) / reachy_sr for p in pending)
+                    pending.clear()
+                    logger.debug("Speech confirmed (energy=%.4f, streak=%d)", energy, loud_streak)
+            else:
+                silent_time = 0.0
+                chunks.append(flat)
+                speech_time += frame_dur
         elif speaking:
             chunks.append(flat)
             speech_time += frame_dur
@@ -186,6 +196,8 @@ def record_speech_reachy(
                 logger.debug("Silence timeout — speech ended (%.2fs captured)", speech_time)
                 break
         else:
+            loud_streak = 0
+            pending.clear()
             time.sleep(REACHY_POLL_S)
 
     if not chunks:
@@ -219,6 +231,7 @@ def transcribe(audio: np.ndarray) -> str | None:
     wav_bytes = _audio_to_wav_bytes(audio)
     client = _get_gemini_client()
 
+    t0 = time.monotonic()
     try:
         response = client.models.generate_content(
             model=STT_MODEL,
@@ -229,13 +242,16 @@ def transcribe(audio: np.ndarray) -> str | None:
                 types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav"),
             ],
         )
+        elapsed = time.monotonic() - t0
         text = response.text.strip().strip('"').strip("'").lower()
         if not text:
+            logger.debug("STT returned empty (%.2fs)", elapsed)
             return None
-        logger.debug("Gemini STT: '%s'", text)
+        logger.info("STT [%s]: '%s' (%.2fs)", STT_MODEL, text, elapsed)
         return text
     except Exception as e:
-        logger.warning("Gemini transcription failed: %s", e)
+        elapsed = time.monotonic() - t0
+        logger.warning("Gemini transcription failed (%.2fs): %s", elapsed, e)
         return None
 
 

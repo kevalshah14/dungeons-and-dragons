@@ -1,7 +1,7 @@
 [project]
 name = "dungeons-and-dragons"
-version = "0.4.0"
-description = "Voice-driven D&D with Reachy Mini — Gemini DM + Minimax TTS"
+version = "0.5.0"
+description = "Voice-driven D&D with Reachy Mini — Gemini DM + Minimax TTS + Face Recognition"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28.0",
     "soundfile>=0.13.0",
     "pydantic>=2.11.0",
+    "opencv-python>=4.10.0",
 ]
 
 [tool.uv]

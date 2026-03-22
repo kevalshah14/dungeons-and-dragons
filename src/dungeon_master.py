@@ -3,7 +3,7 @@ from google.genai import types
 
 from src.models import Story, Party, DynamicScene, TurnRecord, GameState
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 
 SYSTEM_INSTRUCTION = """\
 You are a Dungeons & Dragons Dungeon Master telling a story. \
@@ -61,6 +61,11 @@ CHARACTER DIALOGUE:
 - When a character SPEAKS in a scene, add their line to the "dialogue" list.
 - This includes NPCs, villains, quest givers, and player characters reacting.
 - Each dialogue line has "character" (exact name) and "line" (what they say).
+- ALL dialogue MUST be FIRST PERSON. Characters speak as themselves.
+  * GOOD: "I draw my bow and take aim at the shadow."
+  * GOOD: "I don't trust that merchant. Something feels off."
+  * BAD: "Kael draws his bow." (third person -- NEVER do this)
+  * BAD: "She casts a fireball." (third person -- NEVER do this)
 - Write dialogue that fits the character's personality:
   * Villains: mean, taunting, threatening
   * Quest givers: worried, grateful, urgent

@@ -14,6 +14,8 @@ MAX_RETRIES = 3
 
 _voice = None
 _robot = None
+_registry = None
+_active_character: str | None = None
 
 
 def set_voice(game_voice):
@@ -25,6 +27,25 @@ def set_robot(reachy_mini):
     """Attach a ReachyMini so mic input is routed through the robot."""
     global _robot
     _robot = reachy_mini
+
+
+def set_registry(registry):
+    """Store the player registry (dict keyed by character name)."""
+    global _registry
+    _registry = registry
+
+
+def set_active_character(character_name: str | None):
+    """Set which character is currently being addressed."""
+    global _active_character
+    _active_character = character_name
+
+
+def _active_real_name() -> str | None:
+    """Get the real name for the currently active character."""
+    if _registry and _active_character and _active_character in _registry:
+        return _registry[_active_character].real_name
+    return None
 
 
 def _say(text: str):
@@ -161,9 +182,11 @@ def ask_choice(question: str, options: list[str]) -> int:
     Understands spoken numbers ("one", "two") and fuzzy keyword
     matching ("sneak" matches "Sneak past the guards").
     """
-    # Reachy reads the situation and options aloud (already done by caller via voice.say)
-    # Here we just listen for the response
-    _say("What do you choose?")
+    real_name = _active_real_name()
+    if real_name:
+        _say(f"{real_name}, what do you choose?")
+    else:
+        _say("What do you choose?")
     print(f"  🎤 Listening for choice (1-{len(options)})...")
 
     for attempt in range(MAX_RETRIES):
