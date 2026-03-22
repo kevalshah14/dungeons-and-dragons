@@ -8,4 +8,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "fastapi>=0.135.1",
     "google-genai>=1.68.0",
+    "opencv-python>=4.13.0.92",
+    "numpy>=2.4.3",
 ]

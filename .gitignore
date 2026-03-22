@@ -15,5 +15,8 @@ wheels/
 # Game saves
 saves/
 
+# Face data
+faces/
+
 # Reference docs (not part of the app)
 docs/
