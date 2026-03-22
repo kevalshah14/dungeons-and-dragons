@@ -3,8 +3,12 @@ Multi-voice TTS using Minimax API.
 
 Gender-aware voice assignment -- male characters get male voices,
 female characters get female voices. Every character sounds distinct.
+
+Audio plays through the Reachy Mini speaker when connected,
+falls back to system speakers otherwise.
 """
 
+import io
 import os
 import subprocess
 import sys
@@ -12,6 +16,9 @@ import tempfile
 import time
 
 import httpx
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample
 
 MINIMAX_API_URL = "https://api.minimax.io/v1/t2a_v2"
 
@@ -159,9 +166,27 @@ class GameVoice:
         self.voice_map: dict[str, str] = {"narrator": NARRATOR_VOICE}
         self._http: httpx.Client | None = None
         self._last_call: float = 0
+        self._reachy = None
+        self._reachy_sr: int = 16000
+        self._playing = False
+        self.emotions = None  # set via set_emotions()
 
         if not self.enabled:
             print("  [TTS] Minimax keys not found -- voice disabled.")
+
+    def set_reachy(self, reachy_mini):
+        """Attach a ReachyMini instance to route audio through its speaker."""
+        self._reachy = reachy_mini
+        if reachy_mini is not None:
+            reachy_mini.media.start_playing()
+            self._reachy_sr = reachy_mini.media.get_output_audio_samplerate()
+            self._playing = True
+            print(f"  🔊 Audio routed to Reachy Mini speaker ({self._reachy_sr} Hz)")
+
+    def stop_reachy_audio(self):
+        if self._playing and self._reachy is not None:
+            self._reachy.media.stop_playing()
+            self._playing = False
 
     def _get_http(self) -> httpx.Client:
         if self._http is None or self._http.is_closed:
@@ -213,10 +238,16 @@ class GameVoice:
         for attempt in range(max_retries + 1):
             try:
                 audio_bytes = self._synthesize(text, voice_id)
+                if self.emotions:
+                    self.emotions.start_talking()
                 self._play(audio_bytes)
+                if self.emotions:
+                    self.emotions.stop_talking()
                 self._last_call = time.time()
                 return
             except Exception as e:
+                if self.emotions:
+                    self.emotions.stop_talking()
                 if attempt < max_retries:
                     wait = 1.0 * (attempt + 1)
                     print(f"  [TTS] Retry {attempt + 1}/{max_retries} in {wait:.0f}s ({e})")
@@ -268,6 +299,30 @@ class GameVoice:
         return bytes.fromhex(hex_audio)
 
     def _play(self, audio_bytes: bytes):
+        if self._reachy is not None:
+            self._play_on_reachy(audio_bytes)
+        else:
+            self._play_on_system(audio_bytes)
+
+    def _play_on_reachy(self, audio_bytes: bytes):
+        data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+
+        if sr != self._reachy_sr:
+            n_out = int(round(self._reachy_sr * len(data) / sr))
+            data = resample(data, n_out).astype(np.float32)
+
+        # Reachy expects stereo (Nx2)
+        stereo = np.column_stack((data, data))
+
+        chunk_size = self._reachy_sr // 10  # 100ms chunks
+        for i in range(0, len(stereo), chunk_size):
+            chunk = stereo[i : i + chunk_size]
+            self._reachy.media.push_audio_sample(chunk)
+            time.sleep(len(chunk) / self._reachy_sr)
+
+    def _play_on_system(self, audio_bytes: bytes):
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             f.write(audio_bytes)
             tmp_path = f.name

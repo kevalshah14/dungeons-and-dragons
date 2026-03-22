@@ -1,500 +1,445 @@
+"""Dungeons & Dragons: AI Dungeon Master on Reachy Mini.
+
+Pipeline:
+  "Hey Reachy" wake word -> voice onboarding -> game loop
+  Reachy mic -> Gemini STT -> Gemini DM -> Minimax TTS -> Reachy speaker
+"""
+
+import logging
+import math
 import os
 import random
+import time
 
 from dotenv import load_dotenv
 
-from src.dungeon_master import DungeonMaster
-from src.models import GameState, DynamicScene, ActionOption, TurnRecord
-from src.tts import GameVoice
-
 load_dotenv()
 
-voice = GameVoice()
+logger = logging.getLogger(__name__)
 
-PROFICIENCY_BONUS = 2
+from reachy_mini import ReachyMini
+
+from src.dungeon_master import DungeonMaster
+from src.models import DynamicScene, GameState
+from src.reachy_emotions import ReachyEmotions, classify_scene
+from src.tts import GameVoice
+from src import voice_input
+from src.wake_word import wait_for_wake_word, set_robot as set_wake_robot
 
 
-def roll_d20() -> int:
-    return random.randint(1, 20)
+# ---------------------------------------------------------------------------
+# Onboarding — ask players & theme via Reachy mic/speaker
+# ---------------------------------------------------------------------------
+
+def run_onboarding(robot: ReachyMini, voice: GameVoice) -> tuple[int, str | None]:
+    """Use Reachy's mic + speaker to gather num_players and theme."""
+    print("\n  Phase 1: Voice Onboarding")
+    print("  Speak to Reachy to set up your adventure!\n")
+
+    voice.announce(
+        "Greetings, adventurers! I am Reachy, your Dungeon Master! "
+        "Let's set up your quest."
+    )
+
+    num_players = voice_input.ask_number(
+        "How many brave heroes are joining this quest? Say a number from 1 to 6.",
+        min_val=1,
+        max_val=6,
+    )
+
+    theme = voice_input.ask_text(
+        "What kind of adventure calls to you? "
+        "Fantasy, pirate, horror, space, or something else? "
+        "Say skip if you want me to choose."
+    )
+
+    voice.announce(
+        f"Wonderful! {num_players} heroes on a {theme or 'surprise'} adventure. "
+        "Let me prepare your quest!"
+    )
+
+    print(f"\n  Onboarding complete: {num_players} player(s), theme={theme or 'DM picks'}")
+    return num_players, theme
 
 
-def get_ability_modifier(score: int) -> int:
-    return (score - 10) // 2
+# ---------------------------------------------------------------------------
+# Game helpers
+# ---------------------------------------------------------------------------
+
+def ability_modifier(score: int) -> int:
+    return math.floor((score - 10) / 2)
 
 
-def hp_bar(current: int, maximum: int, width: int = 20) -> str:
-    if maximum <= 0:
-        return "[dead] 0/0"
-    ratio = max(0, current) / maximum
-    filled = int(ratio * width)
-    empty = width - filled
-    if ratio > 0.5:
-        bar_char = "█"
-    elif ratio > 0.25:
-        bar_char = "▓"
+ANTENNA_PULL_THRESHOLD = 0.25
+ANTENNA_POLL_S = 0.02
+ANTENNA_TIMEOUT_S = 30.0
+
+
+def wait_for_antenna_pull(robot) -> str:
+    """Block until a Reachy antenna is pulled. Returns 'left' or 'right'."""
+    prev_left = False
+    prev_right = False
+    start = time.monotonic()
+
+    while (time.monotonic() - start) < ANTENNA_TIMEOUT_S:
+        antennas = robot.get_present_antenna_joint_positions()
+        right_val, left_val = antennas[0], antennas[1]
+
+        right_pulled = right_val < -ANTENNA_PULL_THRESHOLD
+        left_pulled = left_val > ANTENNA_PULL_THRESHOLD
+
+        if right_pulled and not prev_right:
+            return "right"
+        if left_pulled and not prev_left:
+            return "left"
+
+        prev_right = right_pulled
+        prev_left = left_pulled
+        time.sleep(ANTENNA_POLL_S)
+
+    return "timeout"
+
+
+def roll_d20(robot, voice) -> int:
+    """Wait for the player to pull Reachy's antenna, then roll a d20."""
+    voice.announce("Pull my antenna to roll the dice!")
+    print("  Waiting for antenna pull...")
+
+    side = wait_for_antenna_pull(robot)
+    result = random.randint(1, 20)
+
+    if side == "timeout":
+        print("  No antenna pull — auto-rolling.")
     else:
-        bar_char = "▒"
-    return f"[{bar_char * filled}{'░' * empty}] {current}/{maximum}"
-
-
-def print_banner():
-    print(r"""
-    ╔══════════════════════════════════════════════════════════╗
-    ║                                                          ║
-    ║        ⚔️  DUNGEONS & DRAGONS: AI DUNGEON MASTER  ⚔️     ║
-    ║                                                          ║
-    ║           The dice are ready. The story awaits.          ║
-    ║                                                          ║
-    ╚══════════════════════════════════════════════════════════╝
-    """)
-
-
-def print_story_summary(game: GameState):
-    s = game.story
-    print(f"\n{'─'*60}")
-    print(f"  📜 {s.title}")
-    print(f"{'─'*60}")
-    print(f"\n  Setting: {s.setting}")
-    print(f"  Difficulty: {s.difficulty.value}")
-    print(f"\n  {s.backstory}")
-    print(f"\n  🎯 Quest: {s.main_quest}")
-
-    voice.narrate(
-        f"{s.title}. {s.setting}. {s.backstory} Your quest: {s.main_quest}"
-    )
-
-    print(f"\n  📍 Locations:")
-    for loc in s.key_locations:
-        print(f"    - {loc.name}: {loc.description[:80]}...")
-
-    print(f"\n  👥 Key NPCs:")
-    for npc in s.key_npcs:
-        print(f"    - {npc.name} ({npc.gender}, {npc.role}): {npc.description[:80]}...")
-
-    npc_intro = "Let me introduce the key characters. " + " ".join(
-        f"{npc.name}, the {npc.role}." for npc in s.key_npcs
-    )
-    voice.narrate(npc_intro)
-    for npc in s.key_npcs:
-        voice.say(npc.name, npc.description[:120])
-
-
-def print_party(game: GameState):
-    print(f"\n{'─'*60}")
-    print(f"  🛡️  THE PARTY: {game.party.party_name or 'Unnamed Adventurers'}")
-    print(f"{'─'*60}")
-    print(f"  {game.party.shared_goal}\n")
-
-    heroes_intro = "And now, your heroes. " + " ".join(
-        f"{p.name}, a {p.gender} {p.race.value} {p.character_class.value}."
-        for p in game.party.players
-    )
-    voice.narrate(heroes_intro)
-
-    for i, p in enumerate(game.party.players, 1):
-        scores = p.ability_scores
-        print(f"  ── Player {i}: {p.name} ──")
-        print(f"     {p.gender.title()} {p.race.value} {p.character_class.value} | Level {p.level}")
-        print(f"     HP: {p.hit_points} | AC: {p.armor_class}")
-        print(f"     STR:{scores.strength:>3} DEX:{scores.dexterity:>3} CON:{scores.constitution:>3}")
-        print(f"     INT:{scores.intelligence:>3} WIS:{scores.wisdom:>3} CHA:{scores.charisma:>3}")
-        print(f"     Abilities: {', '.join(p.abilities[:3])}")
-        print(f"     Traits: {', '.join(p.personality_traits)}")
-        print(f"     Gear: {', '.join(p.inventory[:5])}")
-        print()
-
-        voice.say(p.name, f"I'm {p.name}. {p.backstory[:100]}")
-
-
-def print_hp_status(game: GameState):
-    print(f"\n  {'─'*40}")
-    for p in game.party.players:
-        current = game.get_hp(p.name)
-        bar = hp_bar(current, p.hit_points)
-        status = ""
-        if current <= 0:
-            status = " 💀 KNOCKED OUT"
-        elif current <= p.hit_points * 0.25:
-            status = " ⚠️  badly hurt"
-        elif current <= p.hit_points * 0.5:
-            status = " 🩹 wounded"
-        print(f"    {p.name:>12}: {bar}{status}")
-    print(f"  {'─'*40}")
-
-
-def find_player_by_name(game: GameState, name: str):
-    for p in game.party.players:
-        if p.name.lower() == name.lower():
-            return p
-    return None
-
-
-def get_ability_score(player, ability: str) -> int:
-    score_map = {
-        "strength": player.ability_scores.strength,
-        "dexterity": player.ability_scores.dexterity,
-        "constitution": player.ability_scores.constitution,
-        "intelligence": player.ability_scores.intelligence,
-        "wisdom": player.ability_scores.wisdom,
-        "charisma": player.ability_scores.charisma,
-    }
-    return score_map.get(ability.lower(), 10)
-
-
-def resolve_option(option: ActionOption, player_name: str, game: GameState) -> dict:
-    player = find_player_by_name(game, player_name)
-
-    result = {
-        "player_name": player_name,
-        "action": option.description,
-        "ability_checked": None,
-        "roll": None,
-        "modifier": None,
-        "proficiency": None,
-        "total": None,
-        "dc": None,
-        "succeeded": None,
-        "was_critical": False,
-        "was_fumble": False,
-        "damage_taken": 0,
-        "hp_after": game.get_hp(player_name),
-    }
-
-    if option.ability_check and option.difficulty_class:
-        ability = option.ability_check.lower()
-        score = get_ability_score(player, ability) if player else 10
-        modifier = get_ability_modifier(score)
-        prof = PROFICIENCY_BONUS
-
-        print(f"\n     🎲 {player_name} rolls {ability.upper()} (DC {option.difficulty_class})")
-        voice.announce(
-            f"{player_name}! Roll for {ability}. "
-            f"You need a {option.difficulty_class} or higher."
-        )
-        try:
-            input(f"     Press Enter to roll... ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-
-        raw_roll = roll_d20()
-        is_crit = raw_roll == 20
-        is_fumble = raw_roll == 1
-        total = raw_roll + modifier + prof
-
-        if is_crit:
-            passed = True
-        elif is_fumble:
-            passed = False
-        else:
-            passed = total >= option.difficulty_class
-
-        result["ability_checked"] = ability
-        result["roll"] = raw_roll
-        result["modifier"] = modifier
-        result["proficiency"] = prof
-        result["total"] = total
-        result["dc"] = option.difficulty_class
-        result["succeeded"] = passed
-        result["was_critical"] = is_crit
-        result["was_fumble"] = is_fumble
-
-        print(f"        d20 = {raw_roll}  +{modifier} (mod)  +{prof} (prof)  = {total}")
-
-        announce_parts = []
-        if is_crit:
-            print(f"     🌟 NATURAL 20 -- CRITICAL HIT!")
-            announce_parts.append(f"Natural twenty! Critical hit! {player_name} is unstoppable!")
-        elif is_fumble:
-            print(f"     💥 NATURAL 1 -- FUMBLE!")
-            announce_parts.append(f"Natural one. Oh no, {player_name}! That's a fumble!")
-        elif passed:
-            print(f"     ✅ SUCCESS! ({total} beats DC {option.difficulty_class})")
-            announce_parts.append(f"{total} beats {option.difficulty_class}. {player_name} succeeds!")
-        else:
-            print(f"     ❌ FAIL! ({total} doesn't beat DC {option.difficulty_class})")
-            announce_parts.append(f"{total} against {option.difficulty_class}. {player_name} fails!")
-
-        if not passed and option.damage_on_fail:
-            dmg = option.damage_on_fail
-            if is_fumble:
-                dmg = dmg + (dmg // 2)
-                print(f"     💥 Fumble! Takes {dmg} damage!")
-            else:
-                print(f"     💔 Takes {dmg} damage!")
-
-            new_hp = game.apply_damage(player_name, dmg)
-            result["damage_taken"] = dmg
-            result["hp_after"] = new_hp
-
-            if new_hp <= 0:
-                print(f"     💀 {player_name} is KNOCKED OUT!")
-                announce_parts.append(f"{player_name} is knocked out!")
-            else:
-                bar = hp_bar(new_hp, player.hit_points if player else 10)
-                print(f"     HP: {bar}")
-                announce_parts.append(f"{player_name} takes {dmg} damage. {new_hp} hit points left.")
-        elif passed:
-            result["hp_after"] = game.get_hp(player_name)
-
-        voice.announce(" ".join(announce_parts))
-
-    else:
-        result["succeeded"] = True
-        print(f"     ✅ No roll needed.")
+        print(f"  {side.upper()} antenna pulled!")
 
     return result
 
 
-def build_action_summary(result: dict, game: GameState) -> str:
-    player = find_player_by_name(game, result["player_name"])
-    class_info = f" ({player.race.value} {player.character_class.value})" if player else ""
-    r = result
+def get_modifier_for_ability(player, ability_name: str) -> int:
+    scores = player.ability_scores
+    mapping = {
+        "strength": scores.strength,
+        "dexterity": scores.dexterity,
+        "constitution": scores.constitution,
+        "intelligence": scores.intelligence,
+        "wisdom": scores.wisdom,
+        "charisma": scores.charisma,
+    }
+    score = mapping.get(ability_name.lower(), 10)
+    return ability_modifier(score)
 
-    parts = [f"{r['player_name']}{class_info} chose: \"{r['action']}\"."]
 
-    if r["ability_checked"]:
-        if r["was_critical"]:
-            parts.append(
-                f"NATURAL 20 -- CRITICAL HIT! "
-                f"(d20=20 + {r['modifier']} mod + {r['proficiency']} prof = {r['total']} vs DC {r['dc']}). "
-                f"Describe something EPIC. Make this the highlight of the story."
+def present_scene(scene: DynamicScene, game: GameState, voice: GameVoice, emotions: ReachyEmotions):
+    """Narrate the scene, play dialogue, and announce options."""
+    mood = classify_scene(scene.narrative)
+    emotions.play_scene_emotion(mood)
+
+    print(f"\n  {'='*50}")
+    print(f"  {scene.title}")
+    print(f"  {'='*50}")
+    print(f"\n  {scene.narrative}\n")
+
+    voice.narrate(scene.narrative)
+    emotions.wait_for_emotion()
+
+    for line in scene.dialogue:
+        print(f"  {line.character}: \"{line.line}\"")
+        voice.say(line.character, line.line)
+
+    active = scene.active_player
+    player_obj = next((p for p in game.party.players if p.name == active), None)
+    hp = game.get_hp(active) if player_obj else "?"
+
+    print(f"\n  >> {active}'s turn (HP: {hp})")
+    print(f"  {scene.situation}\n")
+
+    situation_text = f"{active}, {scene.situation}"
+    voice.announce(situation_text)
+
+    if scene.options:
+        for i, opt in enumerate(scene.options, 1):
+            risk = ""
+            if opt.ability_check:
+                risk = f" [Roll {opt.ability_check}, DC {opt.difficulty_class}]"
+            print(f"    {i}. {opt.description}{risk}")
+        options_speech = ". ".join(
+            f"Option {i}, {opt.description}"
+            for i, opt in enumerate(scene.options, 1)
+        )
+        voice.announce(f"Your choices are: {options_speech}")
+
+
+def handle_turn(
+    robot: ReachyMini,
+    scene: DynamicScene,
+    game: GameState,
+    voice: GameVoice,
+    emotions: ReachyEmotions,
+) -> str:
+    """Get player choice, resolve dice roll via antenna pull, return action summary."""
+    if not scene.options:
+        return "The adventure ends here."
+
+    choice_idx = voice_input.ask_choice(
+        "What do you choose?",
+        [opt.description for opt in scene.options],
+    )
+    chosen = scene.options[choice_idx]
+    active = scene.active_player
+    player_obj = next((p for p in game.party.players if p.name == active), None)
+
+    print(f"\n  {active} chose: {chosen.description}")
+    voice.announce(f"{active} chooses to {chosen.description}")
+
+    summary_parts = [f"{active} chose: {chosen.description}."]
+
+    if chosen.ability_check and chosen.difficulty_class and player_obj:
+        emotions.play_emotion("inquiring1")
+        raw_roll = roll_d20(robot, voice)
+        mod = get_modifier_for_ability(player_obj, chosen.ability_check)
+        proficiency = 2
+        total = raw_roll + mod + proficiency
+        dc = chosen.difficulty_class
+
+        is_crit = raw_roll == 20
+        is_fumble = raw_roll == 1
+        success = is_crit or (not is_fumble and total >= dc)
+
+        roll_announcement = (
+            f"Roll for {chosen.ability_check}! "
+            f"The die shows... {raw_roll}! "
+            f"Plus {mod} modifier, plus {proficiency} proficiency... "
+            f"Total: {total} against DC {dc}!"
+        )
+        voice.announce(roll_announcement)
+        print(f"  Roll: d20={raw_roll} + {mod} + {proficiency} = {total} vs DC {dc}")
+
+        if is_crit:
+            voice.announce("CRITICAL HIT! Natural twenty!")
+            emotions.play_roll_emotion("critical")
+            print("  CRITICAL HIT!")
+            summary_parts.append(
+                f"Dice roll: natural 20 (CRITICAL HIT). Total {total} vs DC {dc}. Automatic success."
             )
-        elif r["was_fumble"]:
-            parts.append(
-                f"NATURAL 1 -- FUMBLE! "
-                f"(d20=1 + {r['modifier']} mod + {r['proficiency']} prof = {r['total']} vs DC {r['dc']}). "
-                f"Describe something FUNNY and silly. Not cruel, just clumsy."
-            )
-            if r["damage_taken"]:
-                parts.append(f"They took {r['damage_taken']} damage from the fumble.")
-        elif r["succeeded"]:
-            margin = r["total"] - r["dc"]
-            feel = "a really smooth, confident success" if margin >= 5 else "a close call -- just barely made it"
-            parts.append(
-                f"{r['ability_checked'].upper()} check SUCCEEDED "
-                f"(rolled {r['total']} vs DC {r['dc']}). Describe it as {feel}."
+        elif is_fumble:
+            voice.announce("Oh no! Natural one! A fumble!")
+            emotions.play_roll_emotion("fumble")
+            print("  FUMBLE!")
+            damage = int((chosen.damage_on_fail or 0) * 1.5) if chosen.damage_on_fail else 0
+            if damage > 0 and player_obj:
+                new_hp = game.apply_damage(active, damage)
+                voice.announce(f"{active} takes {damage} damage! HP: {new_hp}")
+                print(f"  {active} takes {damage} damage -> HP: {new_hp}")
+                summary_parts.append(
+                    f"Dice roll: natural 1 (FUMBLE). {active} takes {damage} damage (50% extra). HP now {new_hp}."
+                )
+            else:
+                summary_parts.append(
+                    f"Dice roll: natural 1 (FUMBLE). Total {total} vs DC {dc}. Failure with comedic mishap."
+                )
+        elif success:
+            voice.announce(f"Success! {total} beats the DC!")
+            emotions.play_roll_emotion("success")
+            print(f"  SUCCESS!")
+            summary_parts.append(
+                f"Dice roll: {raw_roll} + {mod} + {proficiency} = {total} vs DC {dc}. Success!"
             )
         else:
-            parts.append(
-                f"{r['ability_checked'].upper()} check FAILED "
-                f"(rolled {r['total']} vs DC {r['dc']}). "
-                f"Describe the struggle and what went wrong."
-            )
-            if r["damage_taken"]:
-                parts.append(f"They took {r['damage_taken']} damage!")
-        if r["hp_after"] is not None and r["hp_after"] <= 0:
-            parts.append(f"{r['player_name']} is KNOCKED OUT at 0 HP!")
-    else:
-        parts.append("No dice roll was needed. They just did it.")
+            voice.announce(f"Failed! {total} doesn't beat DC {dc}.")
+            emotions.play_roll_emotion("fail")
+            print(f"  FAILED!")
+            damage = chosen.damage_on_fail or 0
+            if damage > 0 and player_obj:
+                new_hp = game.apply_damage(active, damage)
+                voice.announce(f"{active} takes {damage} damage! HP: {new_hp}")
+                print(f"  {active} takes {damage} damage -> HP: {new_hp}")
+                summary_parts.append(
+                    f"Dice roll: {raw_roll} + {mod} + {proficiency} = {total} vs DC {dc}. "
+                    f"Failure. {active} takes {damage} damage. HP now {new_hp}."
+                )
+            else:
+                summary_parts.append(
+                    f"Dice roll: {raw_roll} + {mod} + {proficiency} = {total} vs DC {dc}. Failure."
+                )
 
-    hp_lines = []
-    for p in game.party.players:
-        hp = game.get_hp(p.name)
-        hp_lines.append(f"  {p.name}: {hp}/{p.hit_points} HP" + (" (knocked out)" if hp <= 0 else ""))
-    parts.append("\nParty HP:\n" + "\n".join(hp_lines))
+        if player_obj and not game.is_conscious(active):
+            voice.announce(f"{active} has been knocked out!")
+            emotions.play_emotion("dying1")
+            summary_parts.append(f"{active} is knocked out at 0 HP!")
+    else:
+        summary_parts.append("No dice roll needed (safe action).")
 
     if game.all_knocked_out():
-        parts.append("\nALL PLAYERS KNOCKED OUT! End the adventure in defeat.")
-    else:
-        parts.append(
-            "\nNow write the next scene. Tell the story of what happened because of this action. "
-            "Then pick which player acts next -- whoever the story naturally turns to."
-        )
+        summary_parts.append("ALL players are knocked out. The adventure ends in defeat.")
 
-    return "\n".join(parts)
+    hp_summary = ", ".join(
+        f"{p.name}: {game.get_hp(p.name)} HP" for p in game.party.players
+    )
+    summary_parts.append(f"Current party HP: {hp_summary}")
 
-
-def play_scene(scene: DynamicScene, game: GameState, dm: DungeonMaster) -> DynamicScene | None:
-    game.turn_number += 1
-
-    print(f"\n{'═'*60}")
-    print(f"  Chapter {game.turn_number}: {scene.title}")
-    print(f"{'═'*60}")
-
-    # --- DM narrates the scene ---
-    print(f"\n  {scene.narrative}")
-    voice.narrate(scene.narrative)
-
-    # --- Character dialogue with announcements ---
-    for dl in scene.dialogue:
-        print(f"\n     💬 {dl.character}: \"{dl.line}\"")
-        voice.say(dl.character, dl.line)
-
-    # --- Check for ending ---
-    if scene.is_ending or not scene.options:
-        ending_emoji = {"victory": "🏆", "defeat": "💀", "bittersweet": "🌅"}.get(
-            scene.ending_type or "", "🔚"
-        )
-        print(f"\n  {ending_emoji} {(scene.ending_type or 'the end').upper()}")
-        print_hp_status(game)
-        print(f"\n{'═'*60}")
-        print(f"  The adventure of \"{game.story.title}\" has concluded!")
-        print(f"{'═'*60}")
-        voice.narrate(f"And so, the adventure of {game.story.title} comes to an end.")
-        game.is_over = True
-        return None
-
-    if game.all_knocked_out():
-        print(f"\n  💀 The entire party has fallen!")
-        voice.narrate("The entire party has fallen. The adventure is over.")
-        game.is_over = True
-        return None
-
-    # --- Announce whose turn it is ---
-    player = find_player_by_name(game, scene.active_player)
-    if player and not game.is_conscious(scene.active_player):
-        summary = (
-            f"{scene.active_player} is knocked out and can't act. "
-            f"Pick a different player who is still conscious."
-        )
-        next_scene = dm.play_turn(summary)
-        game.current_scene = next_scene
-        return next_scene
-
-    class_label = ""
-    current_hp = game.get_hp(scene.active_player)
-    max_hp = 0
-    if player:
-        class_label = f" ({player.gender.title()} {player.race.value} {player.character_class.value})"
-        max_hp = player.hit_points
-    bar = hp_bar(current_hp, max_hp)
-
-    print(f"\n  ── {scene.active_player}'s Turn{class_label} ──  HP: {bar}")
-    voice.announce(f"{scene.active_player}! It's your turn.")
-
-    # --- Player hears situation and options in their own voice ---
-    print(f"     {scene.situation}")
-
-    option_lines = []
-    for i, opt in enumerate(scene.options, 1):
-        dc_text = ""
-        if opt.ability_check and opt.difficulty_class:
-            dc_text = f" [🎲 {opt.ability_check.upper()} DC {opt.difficulty_class}]"
-        dmg_text = ""
-        if opt.damage_on_fail:
-            dmg_text = f" [⚠️ {opt.damage_on_fail} dmg if fail]"
-        print(f"     {i}. {opt.description}{dc_text}{dmg_text}")
-        option_lines.append(f"Option {i}: {opt.description}")
-
-    speech = scene.situation + " " + ". ".join(option_lines) + ". What do I do?"
-    voice.say(scene.active_player, speech)
-
-    # --- Player picks ---
-    while True:
-        try:
-            raw = input(f"\n     {scene.active_player}, choose (1-{len(scene.options)}): ").strip()
-            idx = int(raw) - 1
-            if 0 <= idx < len(scene.options):
-                break
-            print(f"     Pick 1-{len(scene.options)}.")
-        except ValueError:
-            print(f"     Enter a number.")
-        except (EOFError, KeyboardInterrupt):
-            print("\n\n  The adventurers decide to rest for now...")
-            return None
-
-    chosen = scene.options[idx]
-    print(f"     -> {chosen.description}")
-
-    # --- Player character SPEAKS their action ---
-    voice.say(scene.active_player, chosen.description)
-
-    # --- Resolve the action ---
-    result = resolve_option(chosen, scene.active_player, game)
-
-    game.history.append(TurnRecord(
-        turn=game.turn_number,
-        scene_title=scene.title,
-        narrative=scene.narrative,
-        chosen_action=chosen.description,
-        player_who_acted=scene.active_player,
-        ability_checked=result["ability_checked"],
-        dice_roll=result["roll"],
-        dice_modifier=result["modifier"],
-        proficiency_bonus=result["proficiency"],
-        dice_total=result["total"],
-        difficulty_class=result["dc"],
-        succeeded=result["succeeded"],
-        was_critical=result["was_critical"],
-        was_fumble=result["was_fumble"],
-        damage_taken=result["damage_taken"],
-        hp_after=result["hp_after"],
-    ))
-
-    print_hp_status(game)
-
-    action_summary = build_action_summary(result, game)
-    print(f"\n  ⏳ The story continues...")
-    next_scene = dm.play_turn(action_summary)
-    game.current_scene = next_scene
-
-    return next_scene
+    return " ".join(summary_parts)
 
 
-SAVE_DIR = os.path.join(os.path.dirname(__file__), "saves")
-SAVE_PATH = os.path.join(SAVE_DIR, "game_save.json")
+# ---------------------------------------------------------------------------
+# Full game run
+# ---------------------------------------------------------------------------
 
+def run_game(robot: ReachyMini, voice: GameVoice, emotions: ReachyEmotions, num_players: int, theme: str | None):
+    """Run the D&D game with Gemini + Minimax TTS."""
+    print("\n  Phase 2: The Adventure Begins!")
+    print("  " + "=" * 50)
 
-def save_game(game: GameState, path: str = SAVE_PATH):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(game.model_dump_json(indent=2))
-    print(f"  💾 Saved!")
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    dm = DungeonMaster(api_key=gemini_key)
 
-
-def load_game(path: str = SAVE_PATH) -> GameState | None:
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return GameState.model_validate_json(f.read())
-
-
-def main():
-    print_banner()
-
-    while True:
-        try:
-            num_players = int(input("  How many players? (1-6): ").strip())
-            if 1 <= num_players <= 6:
-                break
-            print("  Please enter a number between 1 and 6.")
-        except ValueError:
-            print("  Please enter a valid number.")
-
-    theme = input("  Any theme preference? (press Enter to skip): ").strip() or None
-
-    dm = DungeonMaster()
     game = dm.create_game(num_players, theme)
-
     voice.setup_voices(game.party, game.story)
 
-    print_story_summary(game)
-    print_party(game)
-    save_game(game)
+    for p in game.party.players:
+        intro = (
+            f"{p.name}, a {p.gender} {p.race.value} {p.character_class.value}. "
+            f"{p.backstory}"
+        )
+        voice.say(p.name, intro)
+        print(f"  {p.name}: {p.race.value} {p.character_class.value} — {p.backstory}")
 
-    print("\n  Ready to begin the adventure!")
-    voice.announce("The adventure is about to begin. Are you ready?")
-    start = input("  Press Enter to start (or 'q' to quit): ").strip().lower()
-    if start == "q":
-        print("  Until next time, adventurer...")
-        return
+    voice.announce(
+        f"Your quest: {game.story.main_quest}. Let the adventure begin!"
+    )
+    emotions.play_scene_emotion("exploration")
 
-    print("\n  ⏳ The Dungeon Master opens the book...\n")
-    voice.narrate("And so, our story begins.")
     dm.start_session(game.story, game.party)
     scene = dm.get_first_scene()
     game.current_scene = scene
+    game.turn_number = 1
 
-    while scene:
-        scene = play_scene(scene, game, dm)
-        save_game(game)
+    while True:
+        present_scene(scene, game, voice, emotions)
 
-    print(f"\n  Thanks for playing!")
-    print(f"  Chapters played: {game.turn_number}")
-    crits = sum(1 for h in game.history if h.was_critical)
-    fumbles = sum(1 for h in game.history if h.was_fumble)
-    total_dmg = sum(h.damage_taken for h in game.history)
-    print(f"  Critical hits: {crits} | Fumbles: {fumbles} | Total damage taken: {total_dmg}")
+        if scene.is_ending:
+            ending = scene.ending_type or "unknown"
+            if ending == "victory":
+                emotions.play_scene_emotion("victory", sound=True)
+                voice.announce("Victory! The heroes triumph!")
+            elif ending == "defeat":
+                emotions.play_scene_emotion("defeat")
+                voice.announce("Defeat. The heroes have fallen.")
+            else:
+                emotions.play_scene_emotion("sad")
+                voice.announce("The adventure ends.")
+            break
+
+        if game.all_knocked_out():
+            emotions.play_scene_emotion("defeat")
+            voice.announce("All heroes have fallen. The adventure ends in defeat.")
+            break
+
+        action_summary = handle_turn(robot, scene, game, voice, emotions)
+
+        game.turn_number += 1
+        print(f"\n  [Turn {game.turn_number}] DM is thinking...")
+        voice.announce("The story continues...")
+
+        try:
+            scene = dm.play_turn(action_summary)
+            game.current_scene = scene
+        except Exception as e:
+            logger.error("Gemini error: %s", e)
+            voice.announce("The Dungeon Master pauses for a moment...")
+            try:
+                scene = dm.play_turn(action_summary)
+                game.current_scene = scene
+            except Exception:
+                voice.announce(
+                    "I'm sorry adventurers, the magic has faded. "
+                    "Perhaps we shall continue another time."
+                )
+                break
+
+    voice.announce("Would you like to play again?")
+    if voice_input.ask_confirm("Play another adventure?"):
+        run_game(robot, voice, emotions, num_players, theme)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def print_banner():
+    print(
+        r"""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                                                          ║
+    ║        ⚔️  DUNGEONS & DRAGONS: AI DUNGEON MASTER  ⚔️     ║
+    ║              Reachy Mini + Gemini + Minimax               ║
+    ║                                                          ║
+    ║   Reachy mic → Gemini STT → Gemini DM → Minimax TTS     ║
+    ║                Say "Hey Reachy" to begin!                 ║
+    ║                                                          ║
+    ╚══════════════════════════════════════════════════════════╝
+    """
+    )
+
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s | %(message)s",
+    )
+
+    print_banner()
+
+    print("  Connecting to Reachy Mini...")
+    try:
+        robot = ReachyMini()
+    except Exception as e:
+        logger.error("Failed to connect to Reachy Mini: %s", e)
+        print("  Could not connect. Is reachy-mini-daemon running?")
+        return
+
+    print("  Reachy Mini connected!\n")
+
+    try:
+        robot.media.start_recording()
+        robot.media.start_playing()
+        time.sleep(1)
+
+        voice = GameVoice()
+        voice.set_reachy(robot)
+
+        emotions = ReachyEmotions(robot)
+        emotions.load()
+        voice.emotions = emotions
+
+        voice_input.set_voice(voice)
+        voice_input.set_robot(robot)
+        set_wake_robot(robot)
+
+        wait_for_wake_word()
+
+        num_players, theme = run_onboarding(robot, voice)
+
+        run_game(robot, voice, emotions, num_players, theme)
+
+    except KeyboardInterrupt:
+        logger.info("Game interrupted.")
+    finally:
+        try:
+            robot.media.stop_recording()
+        except Exception:
+            pass
+        try:
+            robot.media.stop_playing()
+        except Exception:
+            pass
+        try:
+            robot.media.close()
+        except Exception:
+            pass
+        robot.client.disconnect()
+        time.sleep(1)
+        print("\n  Thanks for playing! Until the next adventure.")
 
 
 if __name__ == "__main__":

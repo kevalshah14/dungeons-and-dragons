@@ -3,7 +3,7 @@ from google.genai import types
 
 from src.models import Story, Party, DynamicScene, TurnRecord, GameState
 
-MODEL = "gemini-3-flash-preview"
+MODEL = "gemini-2.5-flash"
 
 SYSTEM_INSTRUCTION = """\
 You are a Dungeons & Dragons Dungeon Master telling a story. \

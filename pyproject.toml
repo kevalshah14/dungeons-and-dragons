@@ -1,13 +1,27 @@
 [project]
 name = "dungeons-and-dragons"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.4.0"
+description = "Voice-driven D&D with Reachy Mini — Gemini DM + Minimax TTS"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "python-dotenv>=1.0.0",
-    "fastapi>=0.135.1",
     "google-genai>=1.68.0",
-    "opencv-python>=4.13.0.92",
     "numpy>=2.4.3",
+    "reachy-mini[mujoco]>=1.5.1",
+    "scipy>=1.17.1",
+    "httpx>=0.28.0",
+    "soundfile>=0.13.0",
+    "pydantic>=2.11.0",
 ]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin'"]
+override-dependencies = [
+    "gstreamer-libs>=1.28.1",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "gstreamer-libs"
+version = "1.28.1"
+requires-dist = ["setuptools>=80.9.0"]
