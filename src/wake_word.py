@@ -12,6 +12,8 @@ WAKE_PHRASES = [
     "dungeon master", "dungeon masters", "dungeonmaster",
     "dungeon muster", "dungeon monster", "dunjon master",
     "hey dungeon master", "hey dungeon",
+    "start the game", "start game", "start da game",
+    "let's play", "lets play", "let's start",
 ]
 
 _robot = None
@@ -25,7 +27,7 @@ def set_robot(reachy_mini):
 
 def wait_for_wake_word():
     """Block until 'Dungeon Master' is detected."""
-    print("  Listening for 'Dungeon Master'...")
+    print("  Listening for 'Dungeon Master' or 'Start the game'...")
     while True:
         if _robot is not None:
             text = listen_reachy(_robot)

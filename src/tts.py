@@ -318,7 +318,7 @@ class GameVoice:
         synth_sr = self._reachy_sr if self._reachy is not None else 32000
 
         payload = {
-            "model": "speech-02-turbo",
+            "model": "speech-2.8-hd",
             "text": text,
             "stream": False,
             "language_boost": "en",

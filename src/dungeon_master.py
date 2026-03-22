@@ -202,6 +202,54 @@ Requirements:
 
         return Party.model_validate_json(response.text)
 
+    def create_party_from_descriptions(
+        self, story: Story, descriptions: list[str],
+    ) -> Party:
+        """Build a party from free-form player descriptions of their desired hero."""
+        desc_lines = []
+        for i, desc in enumerate(descriptions, 1):
+            desc_lines.append(f"- Player {i} said: \"{desc}\"")
+
+        prompt = f"""\
+Create {len(descriptions)} player character(s) for this adventure.
+Each player described what kind of hero they want. Build characters that
+match their wishes as closely as possible.
+
+Title: {story.title}
+Setting: {story.setting}
+Main Quest: {story.main_quest}
+
+What each player wants:
+{chr(10).join(desc_lines)}
+
+Requirements:
+- Match each player's description as closely as possible (race, class, style, name if mentioned)
+- If a player mentioned a specific race or class, use that EXACT choice
+- If a player was vague, pick something that fits their description and the adventure
+- Each character at level 1
+- Each character MUST have a gender ("male" or "female")
+- Each backstory: 1-2 sentences connecting to the adventure and the player's description
+- Ability scores 8-18. High stats match the class.
+- 2-3 fun personality traits inspired by what the player said
+- Correct starting gear, HP, and AC for their class
+- List 2-3 class abilities
+- Simple language everywhere
+- Give them a relationship to each other (friends, siblings, rivals, etc.)
+- Every character MUST have a unique fantasy name. NEVER use "Player 1" etc.
+"""
+
+        response = self.client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                response_mime_type="application/json",
+                response_json_schema=Party.model_json_schema(),
+            ),
+        )
+
+        return Party.model_validate_json(response.text)
+
     def start_session(self, story: Story, party: Party):
         system_prompt = _build_dm_system_prompt(story, party)
 
@@ -231,7 +279,10 @@ Requirements:
         response = self._chat.send_message(action_summary)
         return DynamicScene.model_validate_json(response.text)
 
-    def create_game(self, num_players: int, theme: str | None = None) -> GameState:
+    def create_game(
+        self, num_players: int, theme: str | None = None,
+        hero_descriptions: list[str] | None = None,
+    ) -> GameState:
         print(f"\n{'='*60}")
         print(f"  The Dungeon Master is crafting your adventure...")
         print(f"  Players: {num_players}")
@@ -246,7 +297,10 @@ Requirements:
         print()
 
         print("[2/2] Creating the heroes...")
-        party = self.create_party(story, num_players)
+        if hero_descriptions:
+            party = self.create_party_from_descriptions(story, hero_descriptions)
+        else:
+            party = self.create_party(story, num_players)
         for p in party.players:
             print(f"  -> {p.name} -- {p.gender} {p.race.value} {p.character_class.value} (HP: {p.hit_points}, AC: {p.armor_class})")
         print()

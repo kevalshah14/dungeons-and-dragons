@@ -26,6 +26,7 @@ from src.models import DynamicScene, GameState
 from src.player_registry import (
     PlayerSweep,
     RegisteredPlayer,
+    apply_cloned_voices,
     assign_characters,
     face_neutral,
     face_player,
@@ -195,14 +196,11 @@ def present_scene(
         rp = registry[active]
         face_player(robot, rp)
         emotions.set_base_yaw(rp.yaw_deg)
-        real_name = rp.real_name
-        print(f"\n  >> {real_name} as {active}'s turn (HP: {hp})")
-        situation_text = f"{real_name}, as {active}. {scene.situation}"
     else:
-        real_name = active
         emotions.set_base_yaw(0.0)
-        print(f"\n  >> {active}'s turn (HP: {hp})")
-        situation_text = f"{active}, {scene.situation}"
+
+    print(f"\n  >> {active}'s turn (HP: {hp})")
+    situation_text = f"{active}, {scene.situation}"
 
     print(f"  {scene.situation}\n")
     voice.announce(situation_text)
@@ -240,11 +238,8 @@ def handle_turn(
     active = scene.active_player
     player_obj = next((p for p in game.party.players if p.name == active), None)
 
-    # Use real name when addressing
-    real_name = registry[active].real_name if registry and active in registry else active
-
-    print(f"\n  {real_name} as {active} chose: {chosen.description}")
-    voice.announce(f"{real_name} chooses to {chosen.description}")
+    print(f"\n  {active} chose: {chosen.description}")
+    voice.announce(f"{active} chooses to {chosen.description}")
 
     summary_parts = [f"{active} chose: {chosen.description}."]
 
@@ -354,13 +349,21 @@ def run_game(
     gemini_key = os.getenv("GEMINI_API_KEY")
     dm = DungeonMaster(api_key=gemini_key)
 
-    game = dm.create_game(num_players, theme)
+    # Collect hero descriptions from player registration
+    hero_descriptions = None
+    if players:
+        descs = [p.hero_description for p in players if p.hero_description]
+        if descs:
+            hero_descriptions = descs
+
+    game = dm.create_game(num_players, theme, hero_descriptions=hero_descriptions)
     voice.setup_voices(game.party, game.story)
 
     # Map real players to characters
     registry: dict[str, RegisteredPlayer] | None = None
     if players:
         registry = assign_characters(players, game.party)
+        apply_cloned_voices(registry, voice.voice_map)
         voice.set_registry(registry)
         voice_input.set_registry(registry)
 
@@ -370,7 +373,7 @@ def run_game(
                 face_player(robot, rp)
                 emotions.set_base_yaw(rp.yaw_deg)
                 intro = (
-                    f"{rp.real_name}, you will play as {char.name}, "
+                    f"You are {char.name}, "
                     f"a {char.gender} {char.race.value} {char.character_class.value}! "
                     f"{char.backstory}"
                 )
@@ -461,7 +464,7 @@ def print_banner():
     ║              Reachy Mini + Gemini + Minimax               ║
     ║                                                          ║
     ║   Reachy mic → Gemini STT → Gemini DM → Minimax TTS     ║
-    ║              Say "Dungeon Master" to begin!                ║
+    ║       Say "Dungeon Master" or "Start the game"!            ║
     ║                                                          ║
     ╚══════════════════════════════════════════════════════════╝
     """
@@ -506,7 +509,7 @@ def main():
         sleep_pose = create_head_pose(pitch=-20, yaw=0, roll=0, degrees=True, mm=True)
         robot.goto_target(head=sleep_pose, body_yaw=None, duration=1.5)
         time.sleep(1.5)
-        print("  Reachy is sleeping... say 'Dungeon Master' to wake up!\n")
+        print("  Reachy is sleeping... say 'Dungeon Master' or 'Start the game' to wake up!\n")
 
         wait_for_wake_word()
 
@@ -518,7 +521,7 @@ def main():
 
         num_players, theme = run_onboarding(robot, voice)
 
-        # Player registration: scan faces + store positions
+        # Player registration: detect positions + hero description + voice clone
         players = scan_all_players(robot, voice, num_players)
 
         run_game(robot, voice, emotions, num_players, theme, players)
