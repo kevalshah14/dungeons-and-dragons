@@ -46,8 +46,6 @@ class RegisteredPlayer:
     real_name: str
     yaw_deg: float
     character_name: str | None = None
-    cloned_voice_id: str | None = None
-    hero_description: str | None = None
 
 
 def _split_yaw(total_yaw_deg: float) -> tuple[float, float]:
@@ -79,17 +77,10 @@ def _wait_for_voice(robot, timeout: float = DOA_TIMEOUT_S) -> float | None:
 
 
 def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
-    """Locate each player by voice (DoA) and register their position."""
-    # TODO: re-enable when voice cloning is ready
-    # from src.audio import transcribe
-    # from src.voice_clone import clone_voice, record_voice_sample
-
+    """Locate each player by voice (DoA). No name asking -- just detect positions."""
     print("\n  Player Registration (DoA)")
     print("  " + "=" * 40)
-    voice.announce(
-        "Let me find where everyone is sitting! "
-        "Each player, say hello when I call you!"
-    )
+    voice.announce("Let me find where everyone is sitting! Each player, say hello when I call you.")
 
     players: list[RegisteredPlayer] = []
 
@@ -106,6 +97,7 @@ def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
             yaw = 0.0
             logger.warning("No voice detected for player %d — defaulting to front.", i)
 
+        # Rotate body + head toward the player to confirm
         body_rad, head_deg = _split_yaw(yaw)
         pose = create_head_pose(pitch=0, yaw=head_deg, roll=0, degrees=True, mm=True)
         robot.goto_target(head=pose, body_yaw=body_rad, duration=0.6)
@@ -113,47 +105,18 @@ def scan_all_players(robot, voice, num_players: int) -> list[RegisteredPlayer]:
 
         if voice.emotions:
             voice.emotions.set_base_yaw(head_deg)
+        voice.announce(f"Found you, player {i}!")
+        players.append(RegisteredPlayer(real_name=f"Player {i}", yaw_deg=yaw))
+        print(f"  Player {i}: yaw={yaw:.0f}°")
 
-        voice.announce("Found you!")
-
-        # TODO: re-enable hero description + voice cloning
-        # voice.announce(
-        #     "Now tell me, what kind of hero do you want to be? "
-        #     "A sneaky rogue? A powerful wizard? A brave warrior? "
-        #     "Describe your dream character! Keep talking for about ten seconds."
-        # )
-        # print(f"  Recording hero description + voice sample for player {i} (~12s)...")
-        # audio = record_voice_sample(robot)
-        #
-        # hero_desc = None
-        # cloned_id = None
-        # if audio is not None:
-        #     hero_desc = transcribe(audio)
-        #     if hero_desc:
-        #         print(f"  Player {i} wants: \"{hero_desc}\"")
-        #     else:
-        #         print(f"  Could not transcribe player {i}'s description.")
-        #     print(f"  Cloning voice for player {i}...")
-        #     cloned_id = clone_voice(audio, i)
-        #     if cloned_id:
-        #         print(f"  Voice cloned: {cloned_id}")
-        #     else:
-        #         print(f"  Voice clone failed — will use preset voice.")
-        # else:
-        #     print(f"  No audio captured for player {i}.")
-
-        players.append(RegisteredPlayer(
-            real_name=f"Player {i}",
-            yaw_deg=yaw,
-        ))
-
+    # Return to center (body + head)
     if voice.emotions:
         voice.emotions.set_base_yaw(0.0)
     neutral = create_head_pose(pitch=0, yaw=0, roll=0, degrees=True, mm=True)
     robot.goto_target(head=neutral, body_yaw=0.0, duration=0.5)
     time.sleep(0.5)
 
-    voice.announce("Got everyone! Now let me craft your adventure!")
+    voice.announce("Got everyone! Let's begin the adventure!")
     return players
 
 
@@ -168,16 +131,6 @@ def assign_characters(
             p.character_name = char.name
             registry[char.name] = p
     return registry
-
-
-def apply_cloned_voices(registry: dict[str, RegisteredPlayer], voice_map: dict[str, str]):
-    """Override voice_map entries with cloned voice_ids where available."""
-    for char_name, rp in registry.items():
-        if rp.cloned_voice_id:
-            voice_map[char_name] = rp.cloned_voice_id
-            print(f"  [Voice] {char_name} -> cloned voice ({rp.cloned_voice_id})")
-        else:
-            print(f"  [Voice] {char_name} -> preset voice ({voice_map.get(char_name, 'default')})")
 
 
 class PlayerSweep:

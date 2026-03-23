@@ -26,7 +26,6 @@ from src.models import DynamicScene, GameState
 from src.player_registry import (
     PlayerSweep,
     RegisteredPlayer,
-    # apply_cloned_voices,  # TODO: re-enable when voice cloning is ready
     assign_characters,
     face_neutral,
     face_player,
@@ -349,21 +348,13 @@ def run_game(
     gemini_key = os.getenv("GEMINI_API_KEY")
     dm = DungeonMaster(api_key=gemini_key)
 
-    # Collect hero descriptions from player registration
-    hero_descriptions = None
-    if players:
-        descs = [p.hero_description for p in players if p.hero_description]
-        if descs:
-            hero_descriptions = descs
-
-    game = dm.create_game(num_players, theme, hero_descriptions=hero_descriptions)
+    game = dm.create_game(num_players, theme)
     voice.setup_voices(game.party, game.story)
 
     # Map real players to characters
     registry: dict[str, RegisteredPlayer] | None = None
     if players:
         registry = assign_characters(players, game.party)
-        # apply_cloned_voices(registry, voice.voice_map)  # TODO: re-enable
         voice.set_registry(registry)
         voice_input.set_registry(registry)
 
@@ -521,7 +512,7 @@ def main():
 
         num_players, theme = run_onboarding(robot, voice)
 
-        # Player registration: detect positions + hero description + voice clone
+        # Player registration: scan faces + store positions
         players = scan_all_players(robot, voice, num_players)
 
         run_game(robot, voice, emotions, num_players, theme, players)
